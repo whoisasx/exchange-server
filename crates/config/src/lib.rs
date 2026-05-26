@@ -1,5 +1,5 @@
-use dotenv::dotenv;
+use dotenvy::dotenv;
 
-pub fn config_envs() -> Result<(), dotenv::Error> {
+pub fn config_envs() -> Result<(), dotenvy::Error> {
     dotenv().map(|_| ())
 }
