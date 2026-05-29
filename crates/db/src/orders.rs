@@ -146,3 +146,143 @@ pub async fn get_market_orders(
 
     Ok(orders)
 }
+
+pub async fn get_orders_by_market_id(market_id: &str) -> Result<Vec<OrderRow>, sqlx::Error> {
+    let orders = sqlx::query_as!(
+        OrderRow,
+        r#"
+            SELECT
+                order_id,
+                user_id,
+                market_id,
+                market_name,
+                side as "side!: SideType",
+                order_type as "order_type!: OrderType",
+                quantity,
+                price,
+                status as "status!: OrderStatus",
+                margin,
+                created_at,
+                updated_at
+            FROM orders
+            WHERE market_id=$1
+            ORDER BY created_at DESC
+        "#,
+        market_id
+    )
+    .fetch_all(pool())
+    .await?;
+
+    Ok(orders)
+}
+
+pub async fn get_orders_by_market_status(
+    market_id: &str,
+    status: OrderStatus,
+) -> Result<Vec<OrderRow>, sqlx::Error> {
+    let orders = sqlx::query_as!(
+        OrderRow,
+        r#"
+            SELECT
+                order_id,
+                user_id,
+                market_id,
+                market_name,
+                side as "side!: SideType",
+                order_type as "order_type!: OrderType",
+                quantity,
+                price,
+                status as "status!: OrderStatus",
+                margin,
+                created_at,
+                updated_at
+            FROM orders
+            WHERE market_id=$1 AND status=$2
+            ORDER BY created_at DESC
+        "#,
+        market_id,
+        status as OrderStatus
+    )
+    .fetch_all(pool())
+    .await?;
+
+    Ok(orders)
+}
+
+pub async fn get_user_market_orders_by_status(
+    user_id: &str,
+    market_id: &str,
+    status: OrderStatus,
+) -> Result<Vec<OrderRow>, sqlx::Error> {
+    let orders = sqlx::query_as!(
+        OrderRow,
+        r#"
+            SELECT
+                order_id,
+                user_id,
+                market_id,
+                market_name,
+                side as "side!: SideType",
+                order_type as "order_type!: OrderType",
+                quantity,
+                price,
+                status as "status!: OrderStatus",
+                margin,
+                created_at,
+                updated_at
+            FROM orders
+            WHERE user_id=$1 AND market_id=$2 AND status=$3
+            ORDER BY created_at DESC
+        "#,
+        user_id,
+        market_id,
+        status as OrderStatus
+    )
+    .fetch_all(pool())
+    .await?;
+
+    Ok(orders)
+}
+
+pub async fn update_order_status(
+    order_id: &str,
+    status: OrderStatus,
+    updated_at: DateTime<Utc>,
+) -> Result<OrderRow, sqlx::Error> {
+    let order = sqlx::query_as!(
+        OrderRow,
+        r#"
+            UPDATE orders
+            SET status=$2,
+                updated_at=$3
+            WHERE order_id=$1
+            RETURNING
+                order_id,
+                user_id,
+                market_id,
+                market_name,
+                side as "side!: SideType",
+                order_type as "order_type!: OrderType",
+                quantity,
+                price,
+                status as "status!: OrderStatus",
+                margin,
+                created_at,
+                updated_at
+        "#,
+        order_id,
+        status as OrderStatus,
+        updated_at
+    )
+    .fetch_one(pool())
+    .await?;
+
+    Ok(order)
+}
+
+pub async fn cancel_order(
+    order_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<OrderRow, sqlx::Error> {
+    update_order_status(order_id, OrderStatus::CANCELLED, updated_at).await
+}

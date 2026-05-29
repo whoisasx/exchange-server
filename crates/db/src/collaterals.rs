@@ -29,7 +29,7 @@ pub async fn create_user_collaterals(
     Ok(created_user_collateral)
 }
 
-pub async fn udpate_collateral(
+pub async fn add_total_collateral(
     asset: &str,
     amount: i64,
     user_id: &str,
@@ -37,7 +37,8 @@ pub async fn udpate_collateral(
     let updated_total = sqlx::query_scalar!(
         r#"
     UPDATE user_collaterals
-    SET total=total+$3
+    SET total=total+$3,
+        updated_at=NOW()
     WHERE user_id=$1 AND asset=$2
     RETURNING total
     "#,
@@ -51,11 +52,32 @@ pub async fn udpate_collateral(
     Ok(updated_total)
 }
 
-pub async fn update_locked(asset: &str, amount: i64, user_id: &str) -> Result<i64, sqlx::Error> {
+pub async fn update_collateral(
+    asset: &str,
+    amount: i64,
+    user_id: &str,
+) -> Result<i64, sqlx::Error> {
+    add_total_collateral(asset, amount, user_id).await
+}
+
+pub async fn udpate_collateral(
+    asset: &str,
+    amount: i64,
+    user_id: &str,
+) -> Result<i64, sqlx::Error> {
+    add_total_collateral(asset, amount, user_id).await
+}
+
+pub async fn add_locked_collateral(
+    asset: &str,
+    amount: i64,
+    user_id: &str,
+) -> Result<i64, sqlx::Error> {
     let updated_locked = sqlx::query_scalar!(
         r#"
     UPDATE user_collaterals
-    SET locked=locked+$3
+    SET locked=locked+$3,
+        updated_at=NOW()
     WHERE user_id=$1 AND asset=$2
     RETURNING locked
     "#,
@@ -67,6 +89,58 @@ pub async fn update_locked(asset: &str, amount: i64, user_id: &str) -> Result<i6
     .await?;
 
     Ok(updated_locked)
+}
+
+pub async fn update_locked(asset: &str, amount: i64, user_id: &str) -> Result<i64, sqlx::Error> {
+    add_locked_collateral(asset, amount, user_id).await
+}
+
+pub async fn lock_collateral(
+    asset: &str,
+    amount: i64,
+    user_id: &str,
+) -> Result<UserCollateralRow, sqlx::Error> {
+    let collateral = sqlx::query_as!(
+        UserCollateralRow,
+        r#"
+    UPDATE user_collaterals
+    SET locked=locked+$3,
+        updated_at=NOW()
+    WHERE user_id=$1 AND asset=$2 AND locked+$3<=total
+    RETURNING *
+    "#,
+        user_id,
+        asset,
+        amount,
+    )
+    .fetch_one(pool())
+    .await?;
+
+    Ok(collateral)
+}
+
+pub async fn unlock_collateral(
+    asset: &str,
+    amount: i64,
+    user_id: &str,
+) -> Result<UserCollateralRow, sqlx::Error> {
+    let collateral = sqlx::query_as!(
+        UserCollateralRow,
+        r#"
+    UPDATE user_collaterals
+    SET locked=locked-$3,
+        updated_at=NOW()
+    WHERE user_id=$1 AND asset=$2 AND locked>=$3
+    RETURNING *
+    "#,
+        user_id,
+        asset,
+        amount,
+    )
+    .fetch_one(pool())
+    .await?;
+
+    Ok(collateral)
 }
 
 pub async fn get_collaterals(user_id: &str) -> Result<Vec<UserCollateralRow>, sqlx::Error> {
