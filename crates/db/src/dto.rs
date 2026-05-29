@@ -1,14 +1,21 @@
 use chrono::{DateTime, Utc};
-use sqlx::types::BigDecimal;
 
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq)]
+#[sqlx(type_name = "side_type", rename_all = "UPPERCASE")]
 pub enum SideType {
     LONG,
     SHORT,
 }
+
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq)]
+#[sqlx(type_name = "order_type", rename_all = "UPPERCASE")]
 pub enum OrderType {
     LIMIT,
     MARKET,
 }
+
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq)]
+#[sqlx(type_name = "order_status", rename_all = "UPPERCASE")]
 pub enum OrderStatus {
     PENDING,
     OPEN,
@@ -17,10 +24,16 @@ pub enum OrderStatus {
     CANCELLED,
     REJECTED,
 }
+
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq)]
+#[sqlx(type_name = "margin_type", rename_all = "UPPERCASE")]
 pub enum MarginType {
     ISOLATED,
     CROSS,
 }
+
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq)]
+#[sqlx(type_name = "close_type", rename_all = "UPPERCASE")]
 pub enum CloseType {
     TRADE,
     LIQUIDATION,
@@ -42,15 +55,16 @@ pub struct MarketRow {
     pub decimal_base: i32,
     pub decimal_asset: i32,
     pub decimal_quant: i32,
-    pub last_traded_price: BigDecimal,
+    pub last_traded_price: i64,
     pub created_at: Option<DateTime<Utc>>,
 }
 
 pub struct UserCollateralRow {
     pub user_id: String,
     pub asset: String,
-    pub total: u128,
-    pub locked: u128,
+    pub total: i64,
+    pub locked: i64,
+    pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -61,10 +75,10 @@ pub struct OrderRow {
     pub market_name: String,
     pub side: SideType,
     pub order_type: OrderType,
-    pub quantity: u128,
-    pub price: u128,
+    pub quantity: i64,
+    pub price: i64,
     pub status: OrderStatus,
-    pub margin: u128,
+    pub margin: i64,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -75,13 +89,13 @@ pub struct PositionRow {
     pub market_id: String,
     pub market_name: String,
     pub side: SideType,
-    pub quantity: u128,
-    pub unrealized_pnl: u128,
-    pub maintenance_margin: u128,
-    pub initial_margin: u128,
+    pub quantity: i64,
+    pub unrealized_pnl: i64,
+    pub maintenance_margin: i64,
+    pub initial_margin: i64,
     pub margin_chosen: MarginType,
-    pub liquidation_price: u128,
-    pub average_price: u128,
+    pub liquidation_price: i64,
+    pub average_price: i64,
     pub opened_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -92,12 +106,12 @@ pub struct ClosedPositionRow {
     pub market_id: String,
     pub market_name: String,
     pub side: SideType,
-    pub quantity: u128,
-    pub entry_price: u128,
-    pub exit_price: u128,
-    pub realized_pnl: u128,
-    pub initial_margin: u128,
-    pub closing_fee: u128,
+    pub quantity: i64,
+    pub entry_price: i64,
+    pub exit_price: i64,
+    pub realized_pnl: i64,
+    pub initial_margin: i64,
+    pub closing_fee: i64,
     pub opened_at: Option<DateTime<Utc>>,
     pub closed_at: Option<DateTime<Utc>>,
     pub open_order_id: String,
@@ -111,8 +125,8 @@ pub struct FillRow {
     pub taker_id: String,
     pub maker_order_id: String,
     pub taker_order_id: String,
-    pub price: u128,
-    pub quantity: u128,
+    pub price: i64,
+    pub quantity: i64,
     pub maker_position: SideType,
     pub taker_position: SideType,
     pub created_at: Option<DateTime<Utc>>,

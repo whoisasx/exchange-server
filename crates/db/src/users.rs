@@ -15,9 +15,9 @@ pub async fn upsert_user(
     VALUES($1,$2,$3,$4,$5)
     ON CONFLICT (user_id)
     DO UPDATE
-      SET username=EXCLUDED.username,
-      hashed_password=EXCLUDED.hashed_password,
-      updated_at=NOW()
+        SET username=EXCLUDED.username,
+        hashed_password=EXCLUDED.hashed_password,
+        updated_at=NOW()
     RETURNING *
     "#,
         user_id,

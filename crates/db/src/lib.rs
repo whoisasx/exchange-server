@@ -1,5 +1,11 @@
-pub mod dto;
-pub mod markets;
-pub mod pool;
-pub mod users;
+pub mod closed_position_fills;
+pub mod closed_positions;
 pub mod collaterals;
+pub mod dto;
+pub mod fills;
+pub mod markets;
+pub mod orders;
+pub mod pool;
+pub mod position_fills;
+pub mod positions;
+pub mod users;
