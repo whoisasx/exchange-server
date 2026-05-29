@@ -1,6 +1,10 @@
 use std::sync::OnceLock;
 
-use sqlx::{Pool, postgres::{PgPoolOptions, Postgres} , migrate::MigrateError};
+use sqlx::{
+    Pool,
+    migrate::MigrateError,
+    postgres::{PgPoolOptions, Postgres},
+};
 
 static DB_POOL: OnceLock<Pool<Postgres>> = OnceLock::new();
 
@@ -25,12 +29,6 @@ pub fn pool() -> &'static Pool<Postgres> {
     }
 }
 
-pub fn poool() -> &'static Pool<Postgres> {
-    pool()
-}
-
-pub async fn run_migration() -> Result<(), MigrateError>{
-  sqlx::migrate!("./migrations")
-    .run(pool())
-    .await
+pub async fn run_migration() -> Result<(), MigrateError> {
+    sqlx::migrate!("./migrations").run(pool()).await
 }
