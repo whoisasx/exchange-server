@@ -3,7 +3,7 @@ use chrono::Utc;
 
 pub async fn is_user_exist(username: &str) -> Result<bool,()>{
   match find_user_by_username(username).await {
-    Ok(Some(u))=>{
+    Ok(Some(_))=>{
       Ok(true)
     },
     Ok(None)=>{
@@ -39,7 +39,7 @@ pub async fn get_user_by_username(username: & str)->Result<Option<UserRow>,()>{
   }
 }
 
-pub async fn get_user_by_userid(userid: &str)->Result<Option<UserRow>, ()>{
+pub async fn _get_user_by_userid(userid: &str)->Result<Option<UserRow>, ()>{
   match find_user_by_id(userid).await {
   Ok(Some(u))=>{
     Ok(Some(u))
