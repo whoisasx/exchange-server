@@ -1,8 +1,8 @@
 use crate::pool::pool;
 
 pub async fn link_fill_to_closed_position(
-    position_id: &str,
-    fill_id: &str,
+    position_id: i64,
+    fill_id: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
@@ -18,9 +18,7 @@ pub async fn link_fill_to_closed_position(
     Ok(())
 }
 
-pub async fn get_fill_ids_by_closed_position_id(
-    position_id: &str,
-) -> Result<Vec<String>, sqlx::Error> {
+pub async fn get_fill_ids_by_closed_position_id(position_id: i64) -> Result<Vec<i64>, sqlx::Error> {
     let fill_ids = sqlx::query_scalar!(
         r#"
         SELECT fill_id
@@ -35,7 +33,7 @@ pub async fn get_fill_ids_by_closed_position_id(
     Ok(fill_ids)
 }
 
-pub async fn get_closed_position_ids_by_fill_id(fill_id: &str) -> Result<Vec<String>, sqlx::Error> {
+pub async fn get_closed_position_ids_by_fill_id(fill_id: i64) -> Result<Vec<i64>, sqlx::Error> {
     let position_ids = sqlx::query_scalar!(
         r#"
         SELECT position_id

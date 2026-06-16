@@ -10,3 +10,11 @@ actix-web={workspace = true}
 config = {path = "../../crates/config"}
 db = {path = "../../crates/db"}
 actix-cors= {workspace = true}
+rand = {workspace = true}
+uuid ={workspace = true}
+bcrypt = {workspace = true}
+hex={workspace = true}
+jsonwebtoken={workspace = true}
+serde={workspace = true}
+chrono={workspace = true}
+sqlx={workspace = true}

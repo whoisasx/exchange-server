@@ -1,0 +1,103 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT * FROM user_collaterals WHERE user_id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_collaterals",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "asset",
+        "type_info": {
+          "Custom": {
+            "name": "asset_type",
+            "kind": {
+              "Enum": [
+                "USDC",
+                "USDT",
+                "SOL",
+                "ETH",
+                "BTC",
+                "PERP",
+                "HYP"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "user_collaterals",
+            "name": "asset"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "total",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_collaterals",
+            "name": "total"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "locked",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_collaterals",
+            "name": "locked"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_collaterals",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_collaterals",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e13a9d27bab12c7c17d64e6f8e2f5a063a8c2e895ef16687274c1276917e8255"
+}

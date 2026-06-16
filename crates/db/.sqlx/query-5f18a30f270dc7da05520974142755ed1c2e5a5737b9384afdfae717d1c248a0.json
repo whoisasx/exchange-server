@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT fill_id\n        FROM position_fills\n        WHERE position_id=$1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fill_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "position_fills",
+            "name": "fill_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5f18a30f270dc7da05520974142755ed1c2e5a5737b9384afdfae717d1c248a0"
+}

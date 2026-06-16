@@ -6,9 +6,9 @@ use crate::{
 };
 
 pub async fn create_closed_position(
-    position_id: &str,
-    user_id: &str,
-    market_id: &str,
+    position_id: i64,
+    user_id: i64,
+    market_id: i64,
     market_name: &str,
     side: SideType,
     quantity: i64,
@@ -18,16 +18,15 @@ pub async fn create_closed_position(
     initial_margin: i64,
     closing_fee: i64,
     opened_at: DateTime<Utc>,
-    closed_at: DateTime<Utc>,
-    open_order_id: &str,
-    close_order_id: &str,
+    open_order_id: i64,
+    close_order_id: i64,
     close_reason: CloseType,
 ) -> Result<ClosedPositionRow, sqlx::Error> {
     let closed_position = sqlx::query_as!(
         ClosedPositionRow,
         r#"
-        INSERT INTO closed_positions(position_id, user_id, market_id, market_name, side, quantity, entry_price, exit_price, realized_pnl, initial_margin, closing_fee, opened_at, closed_at, open_order_id, close_order_id, close_reason)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        INSERT INTO closed_positions(position_id, user_id, market_id, market_name, side, quantity, entry_price, exit_price, realized_pnl, initial_margin, closing_fee, opened_at, open_order_id, close_order_id, close_reason)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         RETURNING
             position_id,
             user_id,
@@ -58,7 +57,6 @@ pub async fn create_closed_position(
         initial_margin,
         closing_fee,
         opened_at,
-        closed_at,
         open_order_id,
         close_order_id,
         close_reason as CloseType
@@ -70,7 +68,7 @@ pub async fn create_closed_position(
 }
 
 pub async fn get_closed_position_by_id(
-    position_id: &str,
+    position_id: i64,
 ) -> Result<Option<ClosedPositionRow>, sqlx::Error> {
     let closed_position = sqlx::query_as!(
         ClosedPositionRow,
@@ -104,7 +102,7 @@ pub async fn get_closed_position_by_id(
 }
 
 pub async fn get_closed_positions_by_user_id(
-    user_id: &str,
+    user_id: i64,
 ) -> Result<Vec<ClosedPositionRow>, sqlx::Error> {
     let closed_positions = sqlx::query_as!(
         ClosedPositionRow,
@@ -139,7 +137,7 @@ pub async fn get_closed_positions_by_user_id(
 }
 
 pub async fn get_closed_positions_by_market_id(
-    market_id: &str,
+    market_id: i64,
 ) -> Result<Vec<ClosedPositionRow>, sqlx::Error> {
     let closed_positions = sqlx::query_as!(
         ClosedPositionRow,
@@ -174,8 +172,8 @@ pub async fn get_closed_positions_by_market_id(
 }
 
 pub async fn get_closed_positions_by_user_market(
-    user_id: &str,
-    market_id: &str,
+    user_id: i64,
+    market_id: i64,
 ) -> Result<Vec<ClosedPositionRow>, sqlx::Error> {
     let closed_positions = sqlx::query_as!(
         ClosedPositionRow,

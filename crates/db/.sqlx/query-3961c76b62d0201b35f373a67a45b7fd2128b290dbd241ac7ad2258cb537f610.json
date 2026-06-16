@@ -1,0 +1,185 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO fills(fill_id, maker_id, taker_id, maker_order_id, taker_order_id, price, quantity, maker_position, taker_position, created_at)\n        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)\n        RETURNING\n            fill_id,\n            maker_id,\n            taker_id,\n            maker_order_id,\n            taker_order_id,\n            price,\n            quantity,\n            maker_position as \"maker_position!: SideType\",\n            taker_position as \"taker_position!: SideType\",\n            created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fill_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "fill_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "maker_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "maker_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "taker_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "taker_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "maker_order_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "maker_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "taker_order_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "taker_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "price",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "price"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "quantity",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "quantity"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "maker_position!: SideType",
+        "type_info": {
+          "Custom": {
+            "name": "side_type",
+            "kind": {
+              "Enum": [
+                "LONG",
+                "SHORT"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "maker_position"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "taker_position!: SideType",
+        "type_info": {
+          "Custom": {
+            "name": "side_type",
+            "kind": {
+              "Enum": [
+                "LONG",
+                "SHORT"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "taker_position"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        {
+          "Custom": {
+            "name": "side_type",
+            "kind": {
+              "Enum": [
+                "LONG",
+                "SHORT"
+              ]
+            }
+          }
+        },
+        {
+          "Custom": {
+            "name": "side_type",
+            "kind": {
+              "Enum": [
+                "LONG",
+                "SHORT"
+              ]
+            }
+          }
+        },
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3961c76b62d0201b35f373a67a45b7fd2128b290dbd241ac7ad2258cb537f610"
+}

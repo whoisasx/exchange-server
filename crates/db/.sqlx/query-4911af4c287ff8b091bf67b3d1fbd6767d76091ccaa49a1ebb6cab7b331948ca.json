@@ -1,0 +1,142 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT * FROM markets WHERE market_name= $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "market_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "markets",
+            "name": "market_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "market_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "markets",
+            "name": "market_name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "base_asset",
+        "type_info": {
+          "Custom": {
+            "name": "asset_type",
+            "kind": {
+              "Enum": [
+                "USDC",
+                "USDT",
+                "SOL",
+                "ETH",
+                "BTC",
+                "PERP",
+                "HYP"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "markets",
+            "name": "base_asset"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "quote_asset",
+        "type_info": {
+          "Custom": {
+            "name": "asset_type",
+            "kind": {
+              "Enum": [
+                "USDC",
+                "USDT",
+                "SOL",
+                "ETH",
+                "BTC",
+                "PERP",
+                "HYP"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "markets",
+            "name": "quote_asset"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "decimal_base",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "markets",
+            "name": "decimal_base"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "decimal_quote",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "markets",
+            "name": "decimal_quote"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "last_traded_price",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "markets",
+            "name": "last_traded_price"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "markets",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4911af4c287ff8b091bf67b3d1fbd6767d76091ccaa49a1ebb6cab7b331948ca"
+}

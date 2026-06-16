@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT position_id\n        FROM closed_position_fills\n        WHERE fill_id=$1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "position_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_position_fills",
+            "name": "position_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1856d278e2e95380bb2062cbc79465b77bbb8c425523c377b71acd8d481c69ac"
+}

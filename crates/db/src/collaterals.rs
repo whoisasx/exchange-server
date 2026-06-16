@@ -1,27 +1,31 @@
-use chrono::{DateTime, Utc};
-
-use crate::{dto::UserCollateralRow, pool::pool};
+use crate::{
+    dto::{AssetType, UserCollateralRow},
+    pool::pool,
+};
 
 pub async fn create_user_collaterals(
-    user_id: &str,
-    asset: &str,
+    user_id: i64,
+    asset: AssetType,
     total: i64,
     locked: i64,
-    created_at: DateTime<Utc>,
 ) -> Result<UserCollateralRow, sqlx::Error> {
     let created_user_collateral = sqlx::query_as!(
         UserCollateralRow,
         r#"
-    INSERT INTO user_collaterals(user_id, asset, total, locked, updated_at, created_at)
-    VALUES($1,$2,$3,$4,$5,$6)
-    RETURNING *
-    "#,
+    INSERT INTO user_collaterals(user_id, asset, total, locked)
+    VALUES($1,$2,$3,$4)
+    RETURNING 
         user_id,
-        asset,
+        asset as "asset!: AssetType",
         total,
         locked,
         created_at,
-        created_at
+        updated_at
+    "#,
+        user_id,
+        asset as AssetType,
+        total,
+        locked
     )
     .fetch_one(pool())
     .await?;
@@ -30,9 +34,9 @@ pub async fn create_user_collaterals(
 }
 
 pub async fn add_total_collateral(
-    asset: &str,
+    asset: AssetType,
     amount: i64,
-    user_id: &str,
+    user_id: i64,
 ) -> Result<i64, sqlx::Error> {
     let updated_total = sqlx::query_scalar!(
         r#"
@@ -43,7 +47,7 @@ pub async fn add_total_collateral(
     RETURNING total
     "#,
         user_id,
-        asset,
+        asset as AssetType,
         amount,
     )
     .fetch_one(pool())
@@ -53,25 +57,25 @@ pub async fn add_total_collateral(
 }
 
 pub async fn update_collateral(
-    asset: &str,
+    asset: AssetType,
     amount: i64,
-    user_id: &str,
+    user_id: i64,
 ) -> Result<i64, sqlx::Error> {
-    add_total_collateral(asset, amount, user_id).await
+    add_total_collateral(asset as AssetType, amount, user_id).await
 }
 
 pub async fn udpate_collateral(
-    asset: &str,
+    asset: AssetType,
     amount: i64,
-    user_id: &str,
+    user_id: i64,
 ) -> Result<i64, sqlx::Error> {
-    add_total_collateral(asset, amount, user_id).await
+    add_total_collateral(asset as AssetType, amount, user_id).await
 }
 
 pub async fn add_locked_collateral(
-    asset: &str,
+    asset: AssetType,
     amount: i64,
-    user_id: &str,
+    user_id: i64,
 ) -> Result<i64, sqlx::Error> {
     let updated_locked = sqlx::query_scalar!(
         r#"
@@ -82,7 +86,7 @@ pub async fn add_locked_collateral(
     RETURNING locked
     "#,
         user_id,
-        asset,
+        asset as AssetType,
         amount,
     )
     .fetch_one(pool())
@@ -91,26 +95,36 @@ pub async fn add_locked_collateral(
     Ok(updated_locked)
 }
 
-pub async fn update_locked(asset: &str, amount: i64, user_id: &str) -> Result<i64, sqlx::Error> {
-    add_locked_collateral(asset, amount, user_id).await
+pub async fn update_locked(
+    asset: AssetType,
+    amount: i64,
+    user_id: i64,
+) -> Result<i64, sqlx::Error> {
+    add_locked_collateral(asset as AssetType, amount, user_id).await
 }
 
 pub async fn lock_collateral(
-    asset: &str,
+    asset: AssetType,
     amount: i64,
-    user_id: &str,
+    user_id: i64,
 ) -> Result<UserCollateralRow, sqlx::Error> {
     let collateral = sqlx::query_as!(
         UserCollateralRow,
         r#"
-    UPDATE user_collaterals
-    SET locked=locked+$3,
-        updated_at=NOW()
-    WHERE user_id=$1 AND asset=$2 AND locked+$3<=total
-    RETURNING *
-    "#,
+        UPDATE user_collaterals
+        SET locked=locked+$3,
+            updated_at=NOW()
+        WHERE user_id=$1 AND asset=$2 AND locked+$3<=total
+        RETURNING 
+            user_id,
+            asset as "asset!: AssetType",
+            total,
+            locked,
+            created_at,
+            updated_at
+        "#,
         user_id,
-        asset,
+        asset as AssetType,
         amount,
     )
     .fetch_one(pool())
@@ -120,21 +134,27 @@ pub async fn lock_collateral(
 }
 
 pub async fn unlock_collateral(
-    asset: &str,
+    asset: AssetType,
     amount: i64,
-    user_id: &str,
+    user_id: i64,
 ) -> Result<UserCollateralRow, sqlx::Error> {
     let collateral = sqlx::query_as!(
         UserCollateralRow,
         r#"
-    UPDATE user_collaterals
-    SET locked=locked-$3,
-        updated_at=NOW()
-    WHERE user_id=$1 AND asset=$2 AND locked>=$3
-    RETURNING *
+        UPDATE user_collaterals
+        SET locked=locked-$3,
+            updated_at=NOW()
+        WHERE user_id=$1 AND asset=$2 AND locked>=$3
+        RETURNING 
+            user_id,
+            asset as "asset!: AssetType",
+            total,
+            locked,
+            created_at,
+            updated_at
     "#,
         user_id,
-        asset,
+        asset as AssetType,
         amount,
     )
     .fetch_one(pool())
@@ -143,10 +163,19 @@ pub async fn unlock_collateral(
     Ok(collateral)
 }
 
-pub async fn get_collaterals(user_id: &str) -> Result<Vec<UserCollateralRow>, sqlx::Error> {
+pub async fn get_collaterals(user_id: i64) -> Result<Vec<UserCollateralRow>, sqlx::Error> {
     let collaterals = sqlx::query_as!(
         UserCollateralRow,
-        "SELECT * FROM user_collaterals WHERE user_id=$1",
+        r#"
+        SELECT
+            user_id,
+            asset as "asset!: AssetType",
+            total,
+            locked,
+            created_at,
+            updated_at
+        FROM user_collaterals WHERE user_id=$1
+        "#,
         user_id
     )
     .fetch_all(pool())
@@ -156,14 +185,24 @@ pub async fn get_collaterals(user_id: &str) -> Result<Vec<UserCollateralRow>, sq
 }
 
 pub async fn get_collateral_by_asset(
-    user_id: &str,
-    asset: &str,
+    user_id: i64,
+    asset: AssetType,
 ) -> Result<UserCollateralRow, sqlx::Error> {
     let collateral = sqlx::query_as!(
         UserCollateralRow,
-        "SELECT * FROM user_collaterals WHERE user_id=$1 AND asset=$2",
+        r#"
+        SELECT
+            user_id,
+            asset as "asset!: AssetType",
+            total,
+            locked,
+            created_at,
+            updated_at
+        FROM user_collaterals
+        WHERE user_id=$1 AND asset=$2
+        "#,
         user_id,
-        asset
+        asset as AssetType
     )
     .fetch_one(pool())
     .await?;

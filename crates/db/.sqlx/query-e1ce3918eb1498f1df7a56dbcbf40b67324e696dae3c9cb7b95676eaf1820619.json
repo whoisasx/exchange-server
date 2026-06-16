@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE markets\n        SET last_traded_price=$1\n        WHERE market_id=$2\n    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e1ce3918eb1498f1df7a56dbcbf40b67324e696dae3c9cb7b95676eaf1820619"
+}

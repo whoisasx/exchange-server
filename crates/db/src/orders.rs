@@ -6,9 +6,9 @@ use crate::{
 };
 
 pub async fn create_order(
-    order_id: &str,
-    user_id: &str,
-    market_id: &str,
+    order_id: i64,
+    user_id: i64,
+    market_id: i64,
     market_name: &str,
     side: SideType,
     order_type: OrderType,
@@ -57,7 +57,7 @@ pub async fn create_order(
     Ok(new_order)
 }
 
-pub async fn get_order_by_order_id(order_id: &str) -> Result<OrderRow, sqlx::Error> {
+pub async fn get_order_by_order_id(order_id: i64) -> Result<OrderRow, sqlx::Error> {
     let order = sqlx::query_as!(
         OrderRow,
         r#"
@@ -85,7 +85,7 @@ pub async fn get_order_by_order_id(order_id: &str) -> Result<OrderRow, sqlx::Err
     Ok(order)
 }
 
-pub async fn get_orders_by_user_id(user_id: &str) -> Result<Vec<OrderRow>, sqlx::Error> {
+pub async fn get_orders_by_user_id(user_id: i64) -> Result<Vec<OrderRow>, sqlx::Error> {
     let orders = sqlx::query_as!(
         OrderRow,
         r#"
@@ -114,10 +114,7 @@ pub async fn get_orders_by_user_id(user_id: &str) -> Result<Vec<OrderRow>, sqlx:
     Ok(orders)
 }
 
-pub async fn get_market_orders(
-    user_id: &str,
-    market_id: &str,
-) -> Result<Vec<OrderRow>, sqlx::Error> {
+pub async fn get_market_orders(user_id: i64, market_id: i64) -> Result<Vec<OrderRow>, sqlx::Error> {
     let orders = sqlx::query_as!(
         OrderRow,
         r#"
@@ -147,7 +144,7 @@ pub async fn get_market_orders(
     Ok(orders)
 }
 
-pub async fn get_orders_by_market_id(market_id: &str) -> Result<Vec<OrderRow>, sqlx::Error> {
+pub async fn get_orders_by_market_id(market_id: i64) -> Result<Vec<OrderRow>, sqlx::Error> {
     let orders = sqlx::query_as!(
         OrderRow,
         r#"
@@ -177,7 +174,7 @@ pub async fn get_orders_by_market_id(market_id: &str) -> Result<Vec<OrderRow>, s
 }
 
 pub async fn get_orders_by_market_status(
-    market_id: &str,
+    market_id: i64,
     status: OrderStatus,
 ) -> Result<Vec<OrderRow>, sqlx::Error> {
     let orders = sqlx::query_as!(
@@ -210,8 +207,8 @@ pub async fn get_orders_by_market_status(
 }
 
 pub async fn get_user_market_orders_by_status(
-    user_id: &str,
-    market_id: &str,
+    user_id: i64,
+    market_id: i64,
     status: OrderStatus,
 ) -> Result<Vec<OrderRow>, sqlx::Error> {
     let orders = sqlx::query_as!(
@@ -245,7 +242,7 @@ pub async fn get_user_market_orders_by_status(
 }
 
 pub async fn update_order_status(
-    order_id: &str,
+    order_id: i64,
     status: OrderStatus,
     updated_at: DateTime<Utc>,
 ) -> Result<OrderRow, sqlx::Error> {
@@ -281,8 +278,38 @@ pub async fn update_order_status(
 }
 
 pub async fn cancel_order(
-    order_id: &str,
+    order_id: i64,
     updated_at: DateTime<Utc>,
 ) -> Result<OrderRow, sqlx::Error> {
     update_order_status(order_id, OrderStatus::CANCELLED, updated_at).await
+}
+
+pub async fn get_open_market_orders(market_id: i64) -> Result<Vec<OrderRow>, sqlx::Error> {
+    let orders = sqlx::query_as!(
+        OrderRow,
+        r#"
+            SELECT
+                order_id,
+                user_id,
+                market_id,
+                market_name,
+                side as "side!: SideType",
+                order_type as "order_type!: OrderType",
+                quantity,
+                price,
+                status as "status!: OrderStatus",
+                margin,
+                created_at,
+                updated_at
+            FROM orders
+            WHERE market_id=$1 AND status= $2
+            ORDER BY created_at DESC
+        "#,
+        market_id,
+        OrderStatus::OPEN as OrderStatus,
+    )
+    .fetch_all(pool())
+    .await?;
+
+    Ok(orders)
 }

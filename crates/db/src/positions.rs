@@ -6,9 +6,9 @@ use crate::{
 };
 
 pub async fn create_position(
-    position_id: &str,
-    user_id: &str,
-    market_id: &str,
+    position_id: i64,
+    user_id: i64,
+    market_id: i64,
     market_name: &str,
     side: SideType,
     quantity: i64,
@@ -63,7 +63,7 @@ pub async fn create_position(
     Ok(position)
 }
 
-pub async fn get_position_by_id(position_id: &str) -> Result<Option<PositionRow>, sqlx::Error> {
+pub async fn get_position_by_id(position_id: i64) -> Result<Option<PositionRow>, sqlx::Error> {
     let position = sqlx::query_as!(
         PositionRow,
         r#"
@@ -94,8 +94,8 @@ pub async fn get_position_by_id(position_id: &str) -> Result<Option<PositionRow>
 }
 
 pub async fn get_position_by_user_market(
-    user_id: &str,
-    market_id: &str,
+    user_id: i64,
+    market_id: i64,
 ) -> Result<Option<PositionRow>, sqlx::Error> {
     let position = sqlx::query_as!(
         PositionRow,
@@ -127,7 +127,7 @@ pub async fn get_position_by_user_market(
     Ok(position)
 }
 
-pub async fn get_positions_by_user_id(user_id: &str) -> Result<Vec<PositionRow>, sqlx::Error> {
+pub async fn get_positions_by_user_id(user_id: i64) -> Result<Vec<PositionRow>, sqlx::Error> {
     let positions = sqlx::query_as!(
         PositionRow,
         r#"
@@ -159,7 +159,7 @@ pub async fn get_positions_by_user_id(user_id: &str) -> Result<Vec<PositionRow>,
 }
 
 pub async fn update_position(
-    position_id: &str,
+    position_id: i64,
     quantity: i64,
     unrealized_pnl: i64,
     maintenance_margin: i64,
@@ -214,7 +214,7 @@ pub async fn update_position(
     Ok(position)
 }
 
-pub async fn delete_position(position_id: &str) -> Result<u64, sqlx::Error> {
+pub async fn delete_position(position_id: i64) -> Result<u64, sqlx::Error> {
     let result = sqlx::query!(
         r#"
         DELETE FROM positions
@@ -229,9 +229,9 @@ pub async fn delete_position(position_id: &str) -> Result<u64, sqlx::Error> {
 }
 
 pub async fn close_position(
-    position_id: &str,
-    user_id: &str,
-    market_id: &str,
+    position_id: i64,
+    user_id: i64,
+    market_id: i64,
     market_name: &str,
     side: SideType,
     quantity: i64,
@@ -242,10 +242,10 @@ pub async fn close_position(
     closing_fee: i64,
     opened_at: DateTime<Utc>,
     closed_at: DateTime<Utc>,
-    open_order_id: &str,
-    close_order_id: &str,
+    open_order_id: i64,
+    close_order_id: i64,
     close_reason: CloseType,
-    fill_ids: &[String],
+    fill_ids: &[i64],
 ) -> Result<ClosedPositionRow, sqlx::Error> {
     let mut transaction = pool().begin().await?;
 
@@ -299,7 +299,7 @@ pub async fn close_position(
             VALUES($1,$2)
             "#,
             position_id,
-            fill_id.as_str()
+            fill_id
         )
         .execute(&mut *transaction)
         .await?;

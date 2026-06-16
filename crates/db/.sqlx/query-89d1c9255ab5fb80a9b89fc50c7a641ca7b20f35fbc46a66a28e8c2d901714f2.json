@@ -1,0 +1,156 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            fill_id,\n            maker_id,\n            taker_id,\n            maker_order_id,\n            taker_order_id,\n            price,\n            quantity,\n            maker_position as \"maker_position!: SideType\",\n            taker_position as \"taker_position!: SideType\",\n            created_at\n        FROM fills\n        WHERE maker_order_id=$1 OR taker_order_id=$1\n        ORDER BY created_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fill_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "fill_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "maker_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "maker_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "taker_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "taker_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "maker_order_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "maker_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "taker_order_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "taker_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "price",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "price"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "quantity",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "quantity"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "maker_position!: SideType",
+        "type_info": {
+          "Custom": {
+            "name": "side_type",
+            "kind": {
+              "Enum": [
+                "LONG",
+                "SHORT"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "maker_position"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "taker_position!: SideType",
+        "type_info": {
+          "Custom": {
+            "name": "side_type",
+            "kind": {
+              "Enum": [
+                "LONG",
+                "SHORT"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "taker_position"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "fills",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "89d1c9255ab5fb80a9b89fc50c7a641ca7b20f35fbc46a66a28e8c2d901714f2"
+}

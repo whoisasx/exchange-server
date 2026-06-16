@@ -1,0 +1,194 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                order_id,\n                user_id,\n                market_id,\n                market_name,\n                side as \"side!: SideType\",\n                order_type as \"order_type!: OrderType\",\n                quantity,\n                price,\n                status as \"status!: OrderStatus\",\n                margin,\n                created_at,\n                updated_at\n            FROM orders\n            WHERE order_id=$1\n    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "order_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "market_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "market_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "market_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "market_name"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "side!: SideType",
+        "type_info": {
+          "Custom": {
+            "name": "side_type",
+            "kind": {
+              "Enum": [
+                "LONG",
+                "SHORT"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "side"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "order_type!: OrderType",
+        "type_info": {
+          "Custom": {
+            "name": "order_type",
+            "kind": {
+              "Enum": [
+                "LIMIT",
+                "MARKET"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "order_type"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "quantity",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "quantity"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "price",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "price"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "status!: OrderStatus",
+        "type_info": {
+          "Custom": {
+            "name": "order_status",
+            "kind": {
+              "Enum": [
+                "PENDING",
+                "OPEN",
+                "FILLED",
+                "PARTIAL",
+                "CANCELLED",
+                "REJECTED"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "margin",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "margin"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "orders",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "566b7b51c4d80b96873c0945c43b368f33964c4d500026e313b8ddfc8bab0c18"
+}

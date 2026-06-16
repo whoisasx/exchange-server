@@ -6,11 +6,11 @@ use crate::{
 };
 
 pub async fn create_fill(
-    fill_id: &str,
-    maker_id: &str,
-    taker_id: &str,
-    maker_order_id: &str,
-    taker_order_id: &str,
+    fill_id: i64,
+    maker_id: i64,
+    taker_id: i64,
+    maker_order_id: i64,
+    taker_order_id: i64,
     price: i64,
     quantity: i64,
     maker_position: SideType,
@@ -51,7 +51,7 @@ pub async fn create_fill(
     Ok(fill)
 }
 
-pub async fn get_fill_by_id(fill_id: &str) -> Result<Option<FillRow>, sqlx::Error> {
+pub async fn get_fill_by_id(fill_id: i64) -> Result<Option<FillRow>, sqlx::Error> {
     let fill = sqlx::query_as!(
         FillRow,
         r#"
@@ -77,7 +77,7 @@ pub async fn get_fill_by_id(fill_id: &str) -> Result<Option<FillRow>, sqlx::Erro
     Ok(fill)
 }
 
-pub async fn get_fills_by_order_id(order_id: &str) -> Result<Vec<FillRow>, sqlx::Error> {
+pub async fn get_fills_by_order_id(order_id: i64) -> Result<Vec<FillRow>, sqlx::Error> {
     let fills = sqlx::query_as!(
         FillRow,
         r#"
@@ -104,7 +104,7 @@ pub async fn get_fills_by_order_id(order_id: &str) -> Result<Vec<FillRow>, sqlx:
     Ok(fills)
 }
 
-pub async fn get_fills_by_user_id(user_id: &str) -> Result<Vec<FillRow>, sqlx::Error> {
+pub async fn get_fills_by_user_id(user_id: i64) -> Result<Vec<FillRow>, sqlx::Error> {
     let fills = sqlx::query_as!(
         FillRow,
         r#"
@@ -131,7 +131,7 @@ pub async fn get_fills_by_user_id(user_id: &str) -> Result<Vec<FillRow>, sqlx::E
     Ok(fills)
 }
 
-pub async fn get_fills_by_position_id(position_id: &str) -> Result<Vec<FillRow>, sqlx::Error> {
+pub async fn get_fills_by_position_id(position_id: i64) -> Result<Vec<FillRow>, sqlx::Error> {
     let fills = sqlx::query_as!(
         FillRow,
         r#"
@@ -160,7 +160,7 @@ pub async fn get_fills_by_position_id(position_id: &str) -> Result<Vec<FillRow>,
 }
 
 pub async fn get_fills_by_closed_position_id(
-    position_id: &str,
+    position_id: i64,
 ) -> Result<Vec<FillRow>, sqlx::Error> {
     let fills = sqlx::query_as!(
         FillRow,

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO closed_position_fills(position_id, fill_id)\n            VALUES($1,$2)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6ae6119c76e5a57b4cd0cb7fac636580a89b08f5e0bb78edb2bd9711ba21583b"
+}

@@ -1,0 +1,263 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO closed_positions(position_id, user_id, market_id, market_name, side, quantity, entry_price, exit_price, realized_pnl, initial_margin, closing_fee, opened_at, closed_at, open_order_id, close_order_id, close_reason)\n        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)\n        RETURNING\n            position_id,\n            user_id,\n            market_id,\n            market_name,\n            side as \"side!: SideType\",\n            quantity,\n            entry_price,\n            exit_price,\n            realized_pnl,\n            initial_margin,\n            closing_fee,\n            opened_at,\n            closed_at,\n            open_order_id,\n            close_order_id,\n            close_reason as \"close_reason!: CloseType\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "position_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "position_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "market_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "market_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "market_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "market_name"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "side!: SideType",
+        "type_info": {
+          "Custom": {
+            "name": "side_type",
+            "kind": {
+              "Enum": [
+                "LONG",
+                "SHORT"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "side"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "quantity",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "quantity"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "entry_price",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "entry_price"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "exit_price",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "exit_price"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "realized_pnl",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "realized_pnl"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "initial_margin",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "initial_margin"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "closing_fee",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "closing_fee"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "opened_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "opened_at"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "closed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "closed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "open_order_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "open_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "close_order_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "close_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "close_reason!: CloseType",
+        "type_info": {
+          "Custom": {
+            "name": "close_type",
+            "kind": {
+              "Enum": [
+                "TRADE",
+                "LIQUIDATION"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "closed_positions",
+            "name": "close_reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        {
+          "Custom": {
+            "name": "side_type",
+            "kind": {
+              "Enum": [
+                "LONG",
+                "SHORT"
+              ]
+            }
+          }
+        },
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Int8",
+        "Int8",
+        {
+          "Custom": {
+            "name": "close_type",
+            "kind": {
+              "Enum": [
+                "TRADE",
+                "LIQUIDATION"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7f3a5424f2a3968e1613f8ef2e075eb07392dd2e83f0d3327edf35ee243e51ac"
+}

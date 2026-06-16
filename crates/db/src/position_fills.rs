@@ -1,6 +1,6 @@
 use crate::pool::pool;
 
-pub async fn link_fill_to_position(position_id: &str, fill_id: &str) -> Result<(), sqlx::Error> {
+pub async fn link_fill_to_position(position_id: i64, fill_id: i64) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
         INSERT INTO position_fills(position_id, fill_id)
@@ -15,7 +15,7 @@ pub async fn link_fill_to_position(position_id: &str, fill_id: &str) -> Result<(
     Ok(())
 }
 
-pub async fn get_fill_ids_by_position_id(position_id: &str) -> Result<Vec<String>, sqlx::Error> {
+pub async fn get_fill_ids_by_position_id(position_id: i64) -> Result<Vec<i64>, sqlx::Error> {
     let fill_ids = sqlx::query_scalar!(
         r#"
         SELECT fill_id
@@ -30,7 +30,7 @@ pub async fn get_fill_ids_by_position_id(position_id: &str) -> Result<Vec<String
     Ok(fill_ids)
 }
 
-pub async fn get_position_ids_by_fill_id(fill_id: &str) -> Result<Vec<String>, sqlx::Error> {
+pub async fn get_position_ids_by_fill_id(fill_id: i64) -> Result<Vec<i64>, sqlx::Error> {
     let position_ids = sqlx::query_scalar!(
         r#"
         SELECT position_id
