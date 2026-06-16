@@ -42,3 +42,37 @@ impl From<OrderRow> for PublicOpenOrder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use db::dto::OrderStatus;
+
+    use super::*;
+
+    #[test]
+    fn public_open_order_excludes_private_order_fields() {
+        let order = OrderRow {
+            order_id: 99,
+            user_id: 42,
+            market_id: 1,
+            market_name: String::from("SOL-PERP"),
+            side: SideType::LONG,
+            order_type: OrderType::LIMIT,
+            quantity: 10,
+            price: 100,
+            status: OrderStatus::OPEN,
+            margin: 50,
+            created_at: None,
+            updated_at: None,
+        };
+
+        let public = PublicOpenOrder::from(order);
+
+        assert_eq!(public.market_id, 1);
+        assert_eq!(public.market_name, "SOL-PERP");
+        assert_eq!(public.side, SideType::LONG);
+        assert_eq!(public.order_type, OrderType::LIMIT);
+        assert_eq!(public.quantity, 10);
+        assert_eq!(public.price, 100);
+    }
+}

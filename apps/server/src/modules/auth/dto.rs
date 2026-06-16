@@ -17,4 +17,5 @@ pub struct AuthUser {
 pub struct Claim {
     pub userid: i64,
     pub username: String,
+    pub exp: usize,
 }

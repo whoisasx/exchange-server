@@ -71,3 +71,28 @@ pub async fn get_user_details(req: HttpRequest) -> impl Responder {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{App, http::StatusCode, test};
+
+    use super::*;
+
+    #[actix_web::test]
+    async fn get_all_users_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(get_all_users)).await;
+        let req = test::TestRequest::get().uri("/").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn get_user_details_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(get_user_details)).await;
+        let req = test::TestRequest::get().uri("/me").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}

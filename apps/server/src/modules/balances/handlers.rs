@@ -124,3 +124,28 @@ pub async fn withdraw_balance(req: HttpRequest) -> impl Responder {
     //TODO: hot path
     HttpResponse::Ok().body("hi")
 }
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{App, http::StatusCode, test};
+
+    use super::*;
+
+    #[actix_web::test]
+    async fn get_balance_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(get_balance)).await;
+        let req = test::TestRequest::get().uri("/").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn get_currency_balance_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(get_currency_balance)).await;
+        let req = test::TestRequest::get().uri("/USDC").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}

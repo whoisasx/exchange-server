@@ -3,6 +3,7 @@ use actix_web::{
     web::{self},
 };
 use bcrypt::{DEFAULT_COST, hash, verify};
+use chrono::{Duration, Utc};
 use config::Config;
 use jsonwebtoken::{EncodingKey, Header, encode};
 
@@ -13,6 +14,10 @@ use crate::{
     },
     utils::{helpers::generate_id, types::ResponseBody},
 };
+
+fn jwt_expiration() -> usize {
+    (Utc::now() + Duration::hours(24)).timestamp() as usize
+}
 
 #[post("/signup")]
 pub async fn signup_user(body: web::Json<AuthUser>, config: web::Data<Config>) -> impl Responder {
@@ -64,6 +69,7 @@ pub async fn signup_user(body: web::Json<AuthUser>, config: web::Data<Config>) -
     let my_claims = Claim {
         userid: user_id,
         username: user_info.username.clone(),
+        exp: jwt_expiration(),
     };
     let jwt_token = match encode(
         &Header::default(),
@@ -138,6 +144,7 @@ pub async fn signin_user(body: web::Json<AuthUser>, config: web::Data<Config>) -
     let my_claims = Claim {
         userid: user_id,
         username: user_details.username.clone(),
+        exp: jwt_expiration(),
     };
     let jwt_token = match encode(
         &Header::default(),

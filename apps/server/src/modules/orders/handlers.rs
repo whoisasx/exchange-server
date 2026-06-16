@@ -115,3 +115,55 @@ pub async fn get_open_orders(_req: HttpRequest, path: web::Path<i64>) -> impl Re
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{App, http::StatusCode, test};
+
+    use super::*;
+
+    #[actix_web::test]
+    async fn get_all_orders_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(get_all_orders)).await;
+        let req = test::TestRequest::get().uri("/1").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn place_order_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(place_order)).await;
+        let req = test::TestRequest::post()
+            .uri("/")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(
+                r#"{
+                    "market_id": 1,
+                    "market_name": "SOL-PERP",
+                    "side": "LONG",
+                    "order_type": "LIMIT",
+                    "quantity": 10,
+                    "price": 100,
+                    "margin": 50
+                }"#,
+            )
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn cancel_order_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(cancel_order)).await;
+        let req = test::TestRequest::delete()
+            .uri("/")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(r#"{"market_id": 1, "order_id": 10}"#)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}

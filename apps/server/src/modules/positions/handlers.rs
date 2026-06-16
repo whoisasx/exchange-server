@@ -78,3 +78,31 @@ pub async fn close_position(_req: HttpRequest) -> impl Responder {
 pub async fn liquidate_position(_req: HttpRequest) -> impl Responder {
     HttpResponse::Ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{App, http::StatusCode, test, web};
+
+    use super::*;
+
+    #[actix_web::test]
+    async fn get_open_positions_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(get_open_positions)).await;
+        let req = test::TestRequest::get().uri("/open/1").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn get_closed_positions_rejects_requests_without_claim() {
+        let app = test::init_service(
+            App::new().route("/closed/{market_id}", web::get().to(get_closed_positions)),
+        )
+        .await;
+        let req = test::TestRequest::get().uri("/closed/1").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}

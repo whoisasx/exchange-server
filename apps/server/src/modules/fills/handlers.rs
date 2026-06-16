@@ -181,3 +181,52 @@ pub async fn get_closed_positions_fills(req: HttpRequest, path: web::Path<i64>) 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{App, http::StatusCode, test, web};
+
+    use super::*;
+
+    #[actix_web::test]
+    async fn get_fills_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(get_fills)).await;
+        let req = test::TestRequest::get().uri("/").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn get_orders_fills_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(get_orders_fills)).await;
+        let req = test::TestRequest::get().uri("/orders/1").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn get_positions_fills_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().route(
+            "/positions/{position_id}",
+            web::get().to(get_positions_fills),
+        ))
+        .await;
+        let req = test::TestRequest::get().uri("/positions/1").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn get_closed_positions_fills_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(get_closed_positions_fills)).await;
+        let req = test::TestRequest::get()
+            .uri("/closed-positions/1")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}

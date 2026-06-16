@@ -69,3 +69,124 @@ pub async fn auth_middleware(
 
     next.call(req).await
 }
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{
+        App, HttpMessage, HttpRequest, HttpResponse, body::to_bytes, http::header,
+        middleware::from_fn, test, web,
+    };
+    use chrono::{Duration, Utc};
+    use jsonwebtoken::{EncodingKey, Header, encode};
+
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            database_url: String::from("postgres://localhost/test"),
+            server_url: String::from("http://localhost:8080"),
+            server_port: 8080,
+            server_host: String::from("127.0.0.1"),
+            jwt_secret: String::from("test-secret"),
+        }
+    }
+
+    async fn protected(req: HttpRequest) -> HttpResponse {
+        let username = req
+            .extensions()
+            .get::<Claim>()
+            .map(|claim| claim.username.clone())
+            .unwrap_or_default();
+
+        HttpResponse::Ok().body(username)
+    }
+
+    #[actix_web::test]
+    async fn rejects_missing_authorization_header() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(test_config()))
+                .wrap(from_fn(auth_middleware))
+                .route("/protected", web::get().to(protected)),
+        )
+        .await;
+
+        let req = test::TestRequest::get().uri("/protected").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn rejects_non_bearer_authorization_header() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(test_config()))
+                .wrap(from_fn(auth_middleware))
+                .route("/protected", web::get().to(protected)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header((header::AUTHORIZATION, "Token abc"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn rejects_invalid_bearer_token() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(test_config()))
+                .wrap(from_fn(auth_middleware))
+                .route("/protected", web::get().to(protected)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header((header::AUTHORIZATION, "Bearer not-a-jwt"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn accepts_valid_bearer_token_and_inserts_claim() {
+        let config = test_config();
+        let token = encode(
+            &Header::default(),
+            &Claim {
+                userid: 42,
+                username: String::from("alice"),
+                exp: (Utc::now() + Duration::hours(1)).timestamp() as usize,
+            },
+            &EncodingKey::from_secret(config.jwt_secret.as_ref()),
+        )
+        .expect("test token should encode");
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(config))
+                .wrap(from_fn(auth_middleware))
+                .route("/protected", web::get().to(protected)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/protected")
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+        let body = to_bytes(resp.into_body())
+            .await
+            .expect("response body should be readable");
+        assert_eq!(body.as_ref(), b"alice");
+    }
+}
