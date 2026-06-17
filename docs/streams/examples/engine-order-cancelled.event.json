@@ -1,0 +1,8 @@
+{
+  "type": "OrderCancelled",
+  "payload": {
+    "order_id": 9001,
+    "reservation_id": "res_place_001",
+    "released_amount": 1000
+  }
+}

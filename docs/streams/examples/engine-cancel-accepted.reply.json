@@ -1,0 +1,7 @@
+{
+  "type": "CancelAccepted",
+  "payload": {
+    "request_id": "req_cancel_001",
+    "order_id": 9001
+  }
+}

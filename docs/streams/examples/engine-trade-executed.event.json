@@ -1,0 +1,29 @@
+{
+  "type": "TradeExecuted",
+  "payload": {
+    "fill_id": 7001,
+    "market_id": 1,
+    "price": 100,
+    "quantity": 10,
+    "maker_order_id": 9001,
+    "taker_order_id": 9002,
+    "maker_reservation_id": "res_maker_001",
+    "taker_reservation_id": "res_taker_001",
+    "settlements": [
+      {
+        "reservation_id": "res_taker_001",
+        "debit_asset": "USDC",
+        "debit_amount": 1000,
+        "credit_asset": "SOL",
+        "credit_amount": 10
+      },
+      {
+        "reservation_id": "res_maker_001",
+        "debit_asset": "SOL",
+        "debit_amount": 10,
+        "credit_asset": "USDC",
+        "credit_amount": 1000
+      }
+    ]
+  }
+}

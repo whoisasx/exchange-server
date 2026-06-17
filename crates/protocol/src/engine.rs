@@ -116,6 +116,8 @@ pub struct TradeSettlement {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
 
     #[test]
@@ -141,5 +143,72 @@ mod tests {
             EngineEvent::TradeExecuted(trade) => assert!(trade.settlements.is_empty()),
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn command_fixtures_match_protocol_contract() {
+        assert_command_fixture(include_str!(
+            "../../../docs/streams/examples/engine-place-order.command.json"
+        ));
+        assert_command_fixture(include_str!(
+            "../../../docs/streams/examples/engine-cancel-order.command.json"
+        ));
+    }
+
+    #[test]
+    fn reply_fixtures_match_protocol_contract() {
+        assert_reply_fixture(include_str!(
+            "../../../docs/streams/examples/engine-order-accepted.reply.json"
+        ));
+        assert_reply_fixture(include_str!(
+            "../../../docs/streams/examples/engine-order-rejected.reply.json"
+        ));
+        assert_reply_fixture(include_str!(
+            "../../../docs/streams/examples/engine-cancel-accepted.reply.json"
+        ));
+        assert_reply_fixture(include_str!(
+            "../../../docs/streams/examples/engine-cancel-rejected.reply.json"
+        ));
+    }
+
+    #[test]
+    fn event_fixtures_match_protocol_contract() {
+        assert_event_fixture(include_str!(
+            "../../../docs/streams/examples/engine-order-opened.event.json"
+        ));
+        assert_event_fixture(include_str!(
+            "../../../docs/streams/examples/engine-order-cancelled.event.json"
+        ));
+        assert_event_fixture(include_str!(
+            "../../../docs/streams/examples/engine-trade-executed.event.json"
+        ));
+    }
+
+    fn assert_command_fixture(json: &str) {
+        let parsed = serde_json::from_str::<EngineCommand>(json)
+            .expect("command fixture should match EngineCommand");
+        assert_round_trip(json, &parsed);
+    }
+
+    fn assert_reply_fixture(json: &str) {
+        let parsed = serde_json::from_str::<EngineReply>(json)
+            .expect("reply fixture should match EngineReply");
+        assert_round_trip(json, &parsed);
+    }
+
+    fn assert_event_fixture(json: &str) {
+        let parsed = serde_json::from_str::<EngineEvent>(json)
+            .expect("event fixture should match EngineEvent");
+        assert_round_trip(json, &parsed);
+    }
+
+    fn assert_round_trip<T>(json: &str, parsed: &T)
+    where
+        T: serde::Serialize,
+    {
+        let fixture = serde_json::from_str::<Value>(json).expect("fixture should be valid JSON");
+        let serialized = serde_json::to_value(parsed).expect("protocol value should serialize");
+
+        assert_eq!(serialized, fixture);
     }
 }
