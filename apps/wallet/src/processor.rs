@@ -68,6 +68,8 @@ impl WalletProcessor {
                         request_id: balance.request_id,
                         user_id: deposit.envelope.user_id,
                         asset: balance.asset,
+                        amount: deposit.amount,
+                        reference_id: deposit.reference_id,
                         total: balance.total,
                         locked: balance.locked,
                     })],
@@ -115,6 +117,8 @@ impl WalletProcessor {
                             request_id: balance.request_id.clone(),
                             user_id: withdraw.envelope.user_id,
                             asset: balance.asset,
+                            amount: withdraw.amount,
+                            destination: withdraw.destination.clone(),
                             total: balance.total,
                             locked: balance.locked,
                         })]
@@ -138,6 +142,7 @@ impl WalletProcessor {
                         reservation_id: reservation.reservation_id,
                         asset: reservation.asset,
                         amount: release.amount,
+                        reason: release.reason,
                     })],
                     engine_commands: Vec::new(),
                 })

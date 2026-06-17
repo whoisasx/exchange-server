@@ -100,12 +100,13 @@ done
 echo "building e2e binaries"
 (
   cd "$ROOT_DIR"
-  cargo build -p wallet -p projector -p fake-engine -p ws -p server -p e2e-smoke
+  cargo build -p wallet -p projector -p fake-engine -p ws -p ledger -p server -p e2e-smoke
 )
 
 echo "starting exchange services"
 start_service wallet
 start_service projector
+start_service ledger
 start_service fake-engine
 start_service ws
 start_service server

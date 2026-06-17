@@ -5,6 +5,7 @@ members = [
   "apps/server",
   "apps/e2e-smoke",
   "apps/fake-engine",
+  "apps/ledger",
   "apps/projector",
   "apps/wallet",
   "apps/ws",

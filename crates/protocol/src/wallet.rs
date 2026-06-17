@@ -168,6 +168,7 @@ pub struct WalletFundsReleased {
     pub reservation_id: String,
     pub asset: Asset,
     pub amount: i64,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +187,8 @@ pub struct WalletDepositApplied {
     pub request_id: String,
     pub user_id: i64,
     pub asset: Asset,
+    pub amount: i64,
+    pub reference_id: String,
     pub total: i64,
     pub locked: i64,
 }
@@ -195,6 +198,8 @@ pub struct WalletWithdrawalApplied {
     pub request_id: String,
     pub user_id: i64,
     pub asset: Asset,
+    pub amount: i64,
+    pub destination: String,
     pub total: i64,
     pub locked: i64,
 }

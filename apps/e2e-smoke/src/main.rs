@@ -159,6 +159,7 @@ async fn main() -> Result<()> {
     wait_for_projected_fill(&pool, alice.userid, bob.userid).await?;
     wait_for_filled_orders(&pool, alice.userid, bob.userid).await?;
     wait_for_unlocked_balances(&pool, alice.userid, bob.userid).await?;
+    wait_for_ledger_entries(&pool, alice.userid, bob.userid).await?;
 
     println!("e2e smoke passed");
     Ok(())
@@ -508,6 +509,36 @@ async fn wait_for_unlocked_balances(pool: &Pool<Postgres>, alice: i64, bob: i64)
         .await?;
 
         Ok(rows.len() == 2 && rows.iter().all(|row| row.get::<i64, _>("locked") == 0))
+    })
+    .await
+}
+
+async fn wait_for_ledger_entries(pool: &Pool<Postgres>, alice: i64, bob: i64) -> Result<()> {
+    wait_for_db("ledger entries", || async {
+        let rows = sqlx::query(
+            r#"
+            SELECT kind, COUNT(*)::BIGINT AS count
+            FROM ledger_entries
+            WHERE user_id IN ($1,$2)
+            GROUP BY kind
+            "#,
+        )
+        .bind(alice)
+        .bind(bob)
+        .fetch_all(pool)
+        .await?;
+
+        let count_for = |kind: &str| -> i64 {
+            rows.iter()
+                .find(|row| row.get::<String, _>("kind") == kind)
+                .map(|row| row.get::<i64, _>("count"))
+                .unwrap_or(0)
+        };
+
+        Ok(count_for("DEPOSIT") == 2
+            && count_for("RESERVE") == 2
+            && count_for("TRADE_DEBIT") == 2
+            && count_for("TRADE_CREDIT") == 2)
     })
     .await
 }
