@@ -146,28 +146,57 @@ pub struct CommandRejected {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum WalletEvent {
-    FundsReserved(FundsReserved),
-    FundsReleased(FundsReleased),
-    TradeSettled(TradeSettled),
-    DepositApplied(BalanceUpdated),
-    WithdrawalApplied(BalanceUpdated),
+    FundsReserved(WalletFundsReserved),
+    FundsReleased(WalletFundsReleased),
+    TradeSettled(WalletTradeSettled),
+    DepositApplied(WalletDepositApplied),
+    WithdrawalApplied(WalletWithdrawalApplied),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FundsReleased {
+pub struct WalletFundsReserved {
+    pub request_id: String,
+    pub user_id: i64,
     pub reservation_id: String,
     pub asset: Asset,
     pub amount: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TradeSettled {
+pub struct WalletFundsReleased {
+    pub user_id: i64,
+    pub reservation_id: String,
+    pub asset: Asset,
+    pub amount: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletTradeSettled {
+    pub user_id: i64,
     pub fill_id: i64,
     pub reservation_id: String,
     pub debit_asset: Asset,
     pub debit_amount: i64,
     pub credit_asset: Asset,
     pub credit_amount: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletDepositApplied {
+    pub request_id: String,
+    pub user_id: i64,
+    pub asset: Asset,
+    pub total: i64,
+    pub locked: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletWithdrawalApplied {
+    pub request_id: String,
+    pub user_id: i64,
+    pub asset: Asset,
+    pub total: i64,
+    pub locked: i64,
 }
 
 #[cfg(test)]
@@ -222,5 +251,35 @@ mod tests {
         assert_eq!(cancel.envelope.request_id, "req-1");
         assert_eq!(cancel.market_id, 1);
         assert_eq!(cancel.order_id, 99);
+    }
+
+    #[test]
+    fn wallet_event_funds_reserved_carries_user_id() {
+        let event = WalletEvent::FundsReserved(WalletFundsReserved {
+            request_id: String::from("req-1"),
+            user_id: 42,
+            reservation_id: String::from("res-1"),
+            asset: Asset::USDC,
+            amount: 100,
+        });
+        let value = serde_json::to_value(event).expect("event should serialize");
+
+        assert_eq!(value["type"], "FundsReserved");
+        assert_eq!(value["payload"]["user_id"], 42);
+        assert_eq!(value["payload"]["reservation_id"], "res-1");
+    }
+
+    #[test]
+    fn wallet_reply_funds_reserved_does_not_carry_user_id() {
+        let reply = WalletReply::FundsReserved(FundsReserved {
+            request_id: String::from("req-1"),
+            reservation_id: String::from("res-1"),
+            asset: Asset::USDC,
+            amount: 100,
+        });
+        let value = serde_json::to_value(reply).expect("reply should serialize");
+
+        assert_eq!(value["type"], "FundsReserved");
+        assert!(value["payload"].get("user_id").is_none());
     }
 }

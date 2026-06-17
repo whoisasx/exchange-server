@@ -10,7 +10,7 @@ use protocol::{
         OrderCancelled, OrderOpened, OrderRejected, ReservedPlaceOrder, TradeExecuted,
         TradeSettlement,
     },
-    wallet::{FundsReserved, WalletEvent},
+    wallet::{WalletEvent, WalletFundsReserved},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +78,8 @@ impl FakeEngine {
                             event: EngineEvent::OrderCancelled(OrderCancelled {
                                 order_id: order.order_id,
                                 reservation_id: order.reservation_id,
+                                user_id: order.user_id,
+                                market_id: order.market_id,
                                 released_amount: order.margin_remaining.max(1),
                             }),
                         }],
@@ -187,7 +189,7 @@ impl EngineState {
         fill_id
     }
 
-    fn record_reservation(&mut self, event: FundsReserved) {
+    fn record_reservation(&mut self, event: WalletFundsReserved) {
         self.reservations.insert(
             event.reservation_id.clone(),
             ReservationInfo {
@@ -275,6 +277,8 @@ impl EngineState {
             quantity: fill_quantity,
             maker_order_id: maker.order_id,
             taker_order_id: taker.order_id,
+            maker_user_id: maker.user_id,
+            taker_user_id: taker.user_id,
             maker_reservation_id: Some(maker.reservation_id.clone()),
             taker_reservation_id: Some(taker.reservation_id.clone()),
             settlements: vec![
@@ -369,7 +373,7 @@ mod tests {
     use protocol::{
         common::{CommandEnvelope, OrderType},
         engine::CancelOrder,
-        wallet::FundsReserved,
+        wallet::WalletFundsReserved,
     };
 
     use super::*;
@@ -377,8 +381,9 @@ mod tests {
     #[test]
     fn place_order_accepts_and_opens_first_order() {
         let engine = FakeEngine::new(100, 200);
-        engine.observe_wallet_event(WalletEvent::FundsReserved(FundsReserved {
+        engine.observe_wallet_event(WalletEvent::FundsReserved(WalletFundsReserved {
             request_id: String::from("req-1"),
+            user_id: 42,
             reservation_id: String::from("res-1"),
             asset: Asset::USDC,
             amount: 500,
@@ -438,6 +443,8 @@ mod tests {
         assert_eq!(trade.fill_id, 200);
         assert_eq!(trade.maker_order_id, 100);
         assert_eq!(trade.taker_order_id, 101);
+        assert_eq!(trade.maker_user_id, 1);
+        assert_eq!(trade.taker_user_id, 2);
         assert_eq!(trade.quantity, 10);
         assert_eq!(trade.settlements.len(), 2);
         assert_eq!(trade.settlements[0].debit_amount, 1000);
@@ -477,8 +484,9 @@ mod tests {
     }
 
     fn reserve(engine: &FakeEngine, request_id: &str, reservation_id: &str, amount: i64) {
-        engine.observe_wallet_event(WalletEvent::FundsReserved(FundsReserved {
+        engine.observe_wallet_event(WalletEvent::FundsReserved(WalletFundsReserved {
             request_id: String::from(request_id),
+            user_id: 0,
             reservation_id: String::from(reservation_id),
             asset: Asset::USDC,
             amount,

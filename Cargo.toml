@@ -6,6 +6,7 @@ members = [
   "apps/fake-engine",
   "apps/projector",
   "apps/wallet",
+  "apps/ws",
   "crates/config",
   "crates/db",
   "crates/protocol",

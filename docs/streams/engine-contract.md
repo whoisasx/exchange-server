@@ -33,7 +33,7 @@ All stream messages are JSON encoded with this shape:
 | `engine.replies` | `request_id` | Engine must publish to `payload.envelope.reply_partition` from the original command. |
 | `engine.events` | `market_id` as string | Engine should keep events for one market ordered on the same partition. |
 
-For `OrderCancelled`, the current payload does not include `market_id`; the engine still knows the order's market internally and should use that market as the Redpanda record key.
+Engine events must be self-routeable by payload. WebSocket consumers must not need database lookups to identify the affected account or market.
 
 ## Common Types
 
@@ -122,6 +122,14 @@ Events go to `engine.events` and should be keyed by `market_id`.
 | `OrderCancelled` | `docs/streams/examples/engine-order-cancelled.event.json` |
 | `TradeExecuted` | `docs/streams/examples/engine-trade-executed.event.json` |
 
+Event routing fields:
+
+```text
+OrderOpened: order_id, reservation_id, user_id, market_id
+OrderCancelled: order_id, reservation_id, user_id, market_id, released_amount
+TradeExecuted: fill_id, market_id, price, quantity, maker_order_id, taker_order_id, maker_user_id, taker_user_id, maker_reservation_id, taker_reservation_id, settlements
+```
+
 Event consumers use these events as follows:
 
 - Wallet consumes `OrderCancelled` to release reserved funds.
@@ -150,4 +158,3 @@ Run:
 ```sh
 cargo test -p protocol
 ```
-

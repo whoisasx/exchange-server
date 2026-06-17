@@ -88,6 +88,8 @@ pub struct OrderOpened {
 pub struct OrderCancelled {
     pub order_id: i64,
     pub reservation_id: String,
+    pub user_id: i64,
+    pub market_id: i64,
     pub released_amount: i64,
 }
 
@@ -99,6 +101,8 @@ pub struct TradeExecuted {
     pub quantity: i64,
     pub maker_order_id: i64,
     pub taker_order_id: i64,
+    pub maker_user_id: i64,
+    pub taker_user_id: i64,
     pub maker_reservation_id: Option<String>,
     pub taker_reservation_id: Option<String>,
     #[serde(default)]
@@ -132,6 +136,8 @@ mod tests {
                     "quantity":5,
                     "maker_order_id":10,
                     "taker_order_id":11,
+                    "maker_user_id":42,
+                    "taker_user_id":43,
                     "maker_reservation_id":"res-maker",
                     "taker_reservation_id":"res-taker"
                 }

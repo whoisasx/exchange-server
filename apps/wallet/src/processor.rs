@@ -1,8 +1,9 @@
 use protocol::{
     engine::EngineCommand,
     wallet::{
-        CancelOrderIntent, CommandAccepted, CommandRejected, FundsReleased, InsufficientFunds,
-        PlaceOrderIntent, TradeSettled, WalletCommand, WalletEvent, WalletReply,
+        CancelOrderIntent, CommandAccepted, CommandRejected, InsufficientFunds, PlaceOrderIntent,
+        WalletCommand, WalletDepositApplied, WalletEvent, WalletFundsReleased, WalletFundsReserved,
+        WalletReply, WalletTradeSettled, WalletWithdrawalApplied,
     },
 };
 use serde_json::Value;
@@ -63,7 +64,13 @@ impl WalletProcessor {
 
                 Ok(WalletProcessResult {
                     wallet_replies: vec![reply],
-                    wallet_events: vec![WalletEvent::DepositApplied(balance)],
+                    wallet_events: vec![WalletEvent::DepositApplied(WalletDepositApplied {
+                        request_id: balance.request_id,
+                        user_id: deposit.envelope.user_id,
+                        asset: balance.asset,
+                        total: balance.total,
+                        locked: balance.locked,
+                    })],
                     engine_commands: Vec::new(),
                 })
             }
@@ -104,7 +111,13 @@ impl WalletProcessor {
 
                 let wallet_events = match &reply {
                     WalletReply::BalanceUpdated(balance) => {
-                        vec![WalletEvent::WithdrawalApplied(balance.clone())]
+                        vec![WalletEvent::WithdrawalApplied(WalletWithdrawalApplied {
+                            request_id: balance.request_id.clone(),
+                            user_id: withdraw.envelope.user_id,
+                            asset: balance.asset,
+                            total: balance.total,
+                            locked: balance.locked,
+                        })]
                     }
                     _ => Vec::new(),
                 };
@@ -120,7 +133,8 @@ impl WalletProcessor {
 
                 Ok(WalletProcessResult {
                     wallet_replies: Vec::new(),
-                    wallet_events: vec![WalletEvent::FundsReleased(FundsReleased {
+                    wallet_events: vec![WalletEvent::FundsReleased(WalletFundsReleased {
+                        user_id: reservation.user_id,
                         reservation_id: reservation.reservation_id,
                         asset: reservation.asset,
                         amount: release.amount,
@@ -133,7 +147,8 @@ impl WalletProcessor {
 
                 Ok(WalletProcessResult {
                     wallet_replies: Vec::new(),
-                    wallet_events: vec![WalletEvent::TradeSettled(TradeSettled {
+                    wallet_events: vec![WalletEvent::TradeSettled(WalletTradeSettled {
+                        user_id: reservation.user_id,
                         fill_id: settle.fill_id,
                         reservation_id: reservation.reservation_id,
                         debit_asset: settle.debit_asset,
@@ -204,7 +219,13 @@ impl WalletProcessor {
         if let WalletReply::FundsReserved(reserved) = reply {
             result
                 .wallet_events
-                .push(WalletEvent::FundsReserved(reserved.clone()));
+                .push(WalletEvent::FundsReserved(WalletFundsReserved {
+                    request_id: reserved.request_id.clone(),
+                    user_id: intent.envelope.user_id,
+                    reservation_id: reserved.reservation_id.clone(),
+                    asset: reserved.asset,
+                    amount: reserved.amount,
+                }));
             result.engine_commands.push(EngineCommand::PlaceOrder(
                 intent.into_reserved_order(reserved.reservation_id),
             ));

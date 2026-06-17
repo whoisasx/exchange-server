@@ -649,6 +649,8 @@ mod tests {
             wallet_commands_from_engine_event(EngineEvent::OrderCancelled(OrderCancelled {
                 order_id: 99,
                 reservation_id: String::from("res-1"),
+                user_id: 42,
+                market_id: 1,
                 released_amount: 50,
             }));
 
@@ -672,6 +674,8 @@ mod tests {
                 quantity: 2,
                 maker_order_id: 10,
                 taker_order_id: 11,
+                maker_user_id: 42,
+                taker_user_id: 43,
                 maker_reservation_id: Some(String::from("res-maker")),
                 taker_reservation_id: Some(String::from("res-taker")),
                 settlements: vec![TradeSettlement {

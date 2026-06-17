@@ -8,6 +8,7 @@ Run it alongside the existing services:
 cargo run -p wallet
 cargo run -p projector
 cargo run -p fake-engine
+cargo run -p ws
 cargo run -p server
 ```
 
@@ -24,6 +25,7 @@ Smoke path:
 1. Deposit enough collateral for two users.
 2. Place a limit order for user A.
 3. Place an opposite-side limit order for user B on the same market and crossing price.
-4. Confirm the server receives engine replies, wallet receives settlement events, and projector writes the order/fill read models.
+4. Connect to `GET /ws?token=<jwt>` for each user and subscribe to the traded market.
+5. Confirm the server receives engine replies, wallet receives settlement events, projector writes the order/fill read models, and websocket clients receive account plus market updates.
 
 The fake engine is intentionally not a production matching engine. It exists only to validate stream wiring and consumer behavior.
