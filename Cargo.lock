@@ -1549,6 +1549,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "projector"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "db",
+ "dotenvy",
+ "protocol",
+ "rskafka",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "protocol"
 version = "0.1.0"
 dependencies = [
