@@ -1,0 +1,543 @@
+use std::{env, time::Duration};
+
+use anyhow::{Context, Result, anyhow, bail};
+use futures_util::{SinkExt, StreamExt, stream::SplitSink};
+use reqwest::{Client, StatusCode};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
+use tokio::{
+    net::TcpStream,
+    sync::Mutex,
+    task::JoinHandle,
+    time::{Instant, sleep, timeout},
+};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
+};
+
+type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+const MARKET_ID: i64 = 1;
+const MARKET_NAME: &str = "SOL-PERP";
+
+#[derive(Debug, Clone)]
+struct Settings {
+    server_url: String,
+    ws_url: String,
+    database_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiResponse<T> {
+    success: bool,
+    info: String,
+    body: Option<T>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserRecord {
+    userid: i64,
+    username: String,
+    jwt_token: String,
+}
+
+struct WsClient {
+    write: SplitSink<WsStream, Message>,
+    messages: std::sync::Arc<Mutex<Vec<Value>>>,
+    _reader: JoinHandle<()>,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let settings = Settings::from_env();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("failed to build HTTP client")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&settings.database_url)
+        .await
+        .context("failed to connect to smoke database")?;
+
+    wait_for_server(&client, &settings.server_url).await?;
+    upsert_market(&pool).await?;
+
+    let run_id = unix_millis();
+    let alice = signup(&client, &settings.server_url, &format!("alice-{run_id}")).await?;
+    let bob = signup(&client, &settings.server_url, &format!("bob-{run_id}")).await?;
+
+    println!(
+        "created smoke users {}={} {}={}",
+        alice.username, alice.userid, bob.username, bob.userid
+    );
+
+    let mut alice_ws = connect_ws(&settings.ws_url, &alice.jwt_token).await?;
+    let mut bob_ws = connect_ws(&settings.ws_url, &bob.jwt_token).await?;
+    subscribe_market(&mut alice_ws).await?;
+    subscribe_market(&mut bob_ws).await?;
+
+    command(
+        &client,
+        &settings.server_url,
+        &alice.jwt_token,
+        &format!("deposit-alice-{run_id}"),
+        "/balance/",
+        json!({"asset":"USDC","amount":10000,"reference_id":format!("deposit-alice-{run_id}")}),
+    )
+    .await
+    .context("alice deposit failed")?;
+    command(
+        &client,
+        &settings.server_url,
+        &bob.jwt_token,
+        &format!("deposit-bob-{run_id}"),
+        "/balance/",
+        json!({"asset":"USDC","amount":10000,"reference_id":format!("deposit-bob-{run_id}")}),
+    )
+    .await
+    .context("bob deposit failed")?;
+
+    command(
+        &client,
+        &settings.server_url,
+        &alice.jwt_token,
+        &format!("order-alice-{run_id}"),
+        "/orders/",
+        json!({
+            "market_id": MARKET_ID,
+            "market_name": MARKET_NAME,
+            "side": "LONG",
+            "order_type": "LIMIT",
+            "quantity": 10,
+            "price": 100,
+            "margin": 1000,
+            "margin_asset": "USDC"
+        }),
+    )
+    .await
+    .context("alice order failed")?;
+
+    command(
+        &client,
+        &settings.server_url,
+        &bob.jwt_token,
+        &format!("order-bob-{run_id}"),
+        "/orders/",
+        json!({
+            "market_id": MARKET_ID,
+            "market_name": MARKET_NAME,
+            "side": "SHORT",
+            "order_type": "LIMIT",
+            "quantity": 10,
+            "price": 100,
+            "margin": 1000,
+            "margin_asset": "USDC"
+        }),
+    )
+    .await
+    .context("bob order failed")?;
+
+    wait_for_message(&alice_ws.messages, "alice account trade", is_account_trade).await?;
+    wait_for_message(&bob_ws.messages, "bob account trade", is_account_trade).await?;
+    wait_for_message(&alice_ws.messages, "alice market trade", is_market_trade).await?;
+    wait_for_message(&bob_ws.messages, "bob market trade", is_market_trade).await?;
+    wait_for_message(
+        &alice_ws.messages,
+        "alice wallet settlement",
+        is_wallet_settlement,
+    )
+    .await?;
+    wait_for_message(
+        &bob_ws.messages,
+        "bob wallet settlement",
+        is_wallet_settlement,
+    )
+    .await?;
+
+    wait_for_projected_fill(&pool, alice.userid, bob.userid).await?;
+    wait_for_filled_orders(&pool, alice.userid, bob.userid).await?;
+    wait_for_unlocked_balances(&pool, alice.userid, bob.userid).await?;
+
+    println!("e2e smoke passed");
+    Ok(())
+}
+
+impl Settings {
+    fn from_env() -> Self {
+        Self {
+            server_url: env::var("E2E_SERVER_URL")
+                .unwrap_or_else(|_| String::from("http://127.0.0.1:18080/api")),
+            ws_url: env::var("E2E_WS_URL")
+                .unwrap_or_else(|_| String::from("ws://127.0.0.1:18081/ws")),
+            database_url: env::var("DATABASE_URL").unwrap_or_else(|_| {
+                String::from("postgres://postgres:postgres@127.0.0.1:55432/exchange")
+            }),
+        }
+    }
+}
+
+async fn wait_for_server(client: &Client, server_url: &str) -> Result<()> {
+    let url = format!("{server_url}/orders/open/{MARKET_ID}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+
+    loop {
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                if Instant::now() >= deadline {
+                    bail!("server readiness returned {}", response.status());
+                }
+            }
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(error).context("server did not become ready");
+                }
+            }
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn upsert_market(pool: &Pool<Postgres>) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO markets(
+            market_id,
+            market_name,
+            base_asset,
+            quote_asset,
+            decimal_base,
+            decimal_quote,
+            last_traded_price
+        )
+        VALUES($1,$2,'SOL','USDC',9,6,0)
+        ON CONFLICT(market_id)
+        DO UPDATE
+        SET market_name=EXCLUDED.market_name,
+            base_asset=EXCLUDED.base_asset,
+            quote_asset=EXCLUDED.quote_asset,
+            decimal_base=EXCLUDED.decimal_base,
+            decimal_quote=EXCLUDED.decimal_quote
+        "#,
+    )
+    .bind(MARKET_ID)
+    .bind(MARKET_NAME)
+    .execute(pool)
+    .await
+    .context("failed to upsert smoke market")?;
+
+    Ok(())
+}
+
+async fn signup(client: &Client, server_url: &str, username: &str) -> Result<UserRecord> {
+    let response = client
+        .post(format!("{server_url}/auth/signup"))
+        .json(&json!({"username":username,"password":"password"}))
+        .send()
+        .await
+        .with_context(|| format!("signup request failed for {username}"))?;
+    let status = response.status();
+    let payload = response
+        .json::<ApiResponse<UserRecord>>()
+        .await
+        .with_context(|| format!("signup response was not valid JSON for {username}"))?;
+
+    if status != StatusCode::CREATED || !payload.success {
+        bail!("signup failed for {username}: {status} {}", payload.info);
+    }
+
+    payload
+        .body
+        .ok_or_else(|| anyhow!("signup response missing body for {username}"))
+}
+
+async fn command(
+    client: &Client,
+    server_url: &str,
+    token: &str,
+    idempotency_key: &str,
+    path: &str,
+    body: Value,
+) -> Result<Value> {
+    let response = client
+        .post(format!("{server_url}{path}"))
+        .bearer_auth(token)
+        .header("Idempotency-Key", idempotency_key)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("command request failed for {path}"))?;
+    let status = response.status();
+    let payload = response
+        .json::<ApiResponse<Value>>()
+        .await
+        .with_context(|| format!("command response was not valid JSON for {path}"))?;
+
+    if !status.is_success() || !payload.success {
+        bail!("command failed for {path}: {status} {}", payload.info);
+    }
+
+    let body = payload
+        .body
+        .ok_or_else(|| anyhow!("command response missing body for {path}"))?;
+
+    if status == StatusCode::ACCEPTED {
+        let request_id = body
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("queued command missing request_id for {path}"))?;
+        return poll_request(client, server_url, token, request_id).await;
+    }
+
+    ensure_complete(&body, path)?;
+    Ok(body)
+}
+
+async fn poll_request(
+    client: &Client,
+    server_url: &str,
+    token: &str,
+    request_id: &str,
+) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        let response = client
+            .get(format!("{server_url}/requests/{request_id}"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .with_context(|| format!("request status failed for {request_id}"))?;
+
+        if response.status().is_success() {
+            let payload = response
+                .json::<ApiResponse<Value>>()
+                .await
+                .with_context(|| format!("request status was not valid JSON for {request_id}"))?;
+            if let Some(body) = payload.body {
+                if body
+                    .get("complete")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return Ok(body);
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            bail!("request {request_id} did not complete");
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+fn ensure_complete(body: &Value, label: &str) -> Result<()> {
+    if body
+        .get("complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        bail!("command {label} was not complete: {body}");
+    }
+}
+
+async fn connect_ws(ws_url: &str, token: &str) -> Result<WsClient> {
+    let url = format!("{ws_url}?token={token}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        match connect_async(&url).await {
+            Ok((stream, _)) => {
+                let (write, mut read) = stream.split();
+                let messages = std::sync::Arc::new(Mutex::new(Vec::new()));
+                let reader_messages = messages.clone();
+                let reader = tokio::spawn(async move {
+                    while let Some(message) = read.next().await {
+                        match message {
+                            Ok(Message::Text(text)) => {
+                                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                                    reader_messages.lock().await.push(value);
+                                }
+                            }
+                            Ok(Message::Close(_)) | Err(_) => break,
+                            _ => {}
+                        }
+                    }
+                });
+
+                let client = WsClient {
+                    write,
+                    messages,
+                    _reader: reader,
+                };
+                wait_for_message(&client.messages, "websocket welcome", |value| {
+                    value.get("type").and_then(Value::as_str) == Some("Welcome")
+                })
+                .await?;
+                return Ok(client);
+            }
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(error).context("websocket did not become ready");
+                }
+            }
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn subscribe_market(client: &mut WsClient) -> Result<()> {
+    client
+        .write
+        .send(Message::Text(
+            json!({"type":"Subscribe","payload":{"markets":[MARKET_ID]}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .context("failed to send websocket subscription")?;
+
+    wait_for_message(&client.messages, "websocket subscribed", |value| {
+        value.get("type").and_then(Value::as_str) == Some("Subscribed")
+    })
+    .await?;
+
+    Ok(())
+}
+
+async fn wait_for_message<F>(
+    messages: &std::sync::Arc<Mutex<Vec<Value>>>,
+    label: &str,
+    predicate: F,
+) -> Result<Value>
+where
+    F: Fn(&Value) -> bool,
+{
+    timeout(Duration::from_secs(30), async {
+        loop {
+            {
+                let messages = messages.lock().await;
+                if let Some(message) = messages.iter().find(|message| predicate(message)).cloned() {
+                    return message;
+                }
+            }
+
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timed out waiting for {label}"))
+}
+
+fn is_account_trade(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("AccountEvent")
+        && value.pointer("/payload/source").and_then(Value::as_str) == Some("engine")
+        && value.pointer("/payload/event/type").and_then(Value::as_str) == Some("TradeExecuted")
+}
+
+fn is_market_trade(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("MarketEvent")
+        && value.pointer("/payload/source").and_then(Value::as_str) == Some("engine")
+        && value.pointer("/payload/market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+        && value.pointer("/payload/event/type").and_then(Value::as_str) == Some("TradeExecuted")
+}
+
+fn is_wallet_settlement(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("AccountEvent")
+        && value.pointer("/payload/source").and_then(Value::as_str) == Some("wallet")
+        && value.pointer("/payload/event/type").and_then(Value::as_str) == Some("TradeSettled")
+}
+
+async fn wait_for_projected_fill(pool: &Pool<Postgres>, alice: i64, bob: i64) -> Result<()> {
+    wait_for_db("projected fill", || async {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM fills
+            WHERE maker_id=$1 AND taker_id=$2
+            "#,
+        )
+        .bind(alice)
+        .bind(bob)
+        .fetch_one(pool)
+        .await?;
+        Ok(count >= 1)
+    })
+    .await
+}
+
+async fn wait_for_filled_orders(pool: &Pool<Postgres>, alice: i64, bob: i64) -> Result<()> {
+    wait_for_db("filled orders", || async {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM orders
+            WHERE user_id IN ($1,$2) AND market_id=$3 AND status='FILLED'
+            "#,
+        )
+        .bind(alice)
+        .bind(bob)
+        .bind(MARKET_ID)
+        .fetch_one(pool)
+        .await?;
+        Ok(count == 2)
+    })
+    .await
+}
+
+async fn wait_for_unlocked_balances(pool: &Pool<Postgres>, alice: i64, bob: i64) -> Result<()> {
+    wait_for_db("unlocked balances", || async {
+        let rows = sqlx::query(
+            r#"
+            SELECT user_id, locked
+            FROM user_collaterals
+            WHERE user_id IN ($1,$2) AND asset='USDC'
+            "#,
+        )
+        .bind(alice)
+        .bind(bob)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows.len() == 2 && rows.iter().all(|row| row.get::<i64, _>("locked") == 0))
+    })
+    .await
+}
+
+async fn wait_for_db<F, Fut>(label: &str, mut check: F) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<bool, sqlx::Error>>,
+{
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        if check()
+            .await
+            .with_context(|| format!("database check failed for {label}"))?
+        {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for {label}");
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+fn unix_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_millis()
+}

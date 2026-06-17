@@ -2,7 +2,15 @@
 
 `apps/fake-engine` is a development-only stand-in for the external C++ engine. It speaks the real stream contract, so server, wallet, and projector can be tested before the C++ engine is available.
 
-Run it alongside the existing services:
+Run the automated smoke:
+
+```sh
+scripts/e2e-smoke.sh
+```
+
+The script starts local Postgres and Redpanda with Docker Compose, creates the stream topics, starts `wallet`, `projector`, `fake-engine`, `ws`, and `server`, then drives the REST and websocket flow with `apps/e2e-smoke`.
+
+To run it manually, start the services alongside each other:
 
 ```sh
 cargo run -p wallet
