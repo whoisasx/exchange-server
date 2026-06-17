@@ -1,4 +1,4 @@
-use db::dto::{OrderRow, OrderType, SideType};
+use db::dto::{AssetType, OrderRow, OrderType, SideType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -11,6 +11,8 @@ pub struct PlaceOrder {
     pub quantity: i64,
     pub price: i64,
     pub margin: i64,
+    #[serde(default = "default_margin_asset")]
+    pub margin_asset: AssetType,
 }
 
 #[derive(Deserialize)]
@@ -18,6 +20,10 @@ pub struct PlaceOrder {
 pub struct CancelOrder {
     pub market_id: i64,
     pub order_id: i64,
+}
+
+fn default_margin_asset() -> AssetType {
+    AssetType::USDC
 }
 
 #[derive(Serialize)]

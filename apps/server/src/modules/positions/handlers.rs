@@ -70,13 +70,29 @@ pub async fn get_closed_positions(req: HttpRequest, path: web::Path<i64>) -> imp
 }
 
 #[post("/close")]
-pub async fn close_position(_req: HttpRequest) -> impl Responder {
-    HttpResponse::Ok()
+pub async fn close_position(req: HttpRequest) -> impl Responder {
+    if let Err(response) = authenticated_user(&req) {
+        return response;
+    }
+
+    HttpResponse::NotImplemented().json(ResponseBody::<()> {
+        success: false,
+        info: String::from("close position command is not implemented yet"),
+        body: None,
+    })
 }
 
 #[post("/liquidate")]
-pub async fn liquidate_position(_req: HttpRequest) -> impl Responder {
-    HttpResponse::Ok()
+pub async fn liquidate_position(req: HttpRequest) -> impl Responder {
+    if let Err(response) = authenticated_user(&req) {
+        return response;
+    }
+
+    HttpResponse::NotImplemented().json(ResponseBody::<()> {
+        success: false,
+        info: String::from("liquidation command is not implemented yet"),
+        body: None,
+    })
 }
 
 #[cfg(test)]
@@ -101,6 +117,15 @@ mod tests {
         )
         .await;
         let req = test::TestRequest::get().uri("/closed/1").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn close_position_rejects_requests_without_claim() {
+        let app = test::init_service(App::new().service(close_position)).await;
+        let req = test::TestRequest::post().uri("/close").to_request();
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

@@ -1,7 +1,12 @@
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, post, web};
 use db::dto::OrderRow;
+use protocol::wallet::{CancelOrderIntent, PlaceOrderIntent, WalletCommand};
 
 use crate::{
+    hot_path::{
+        bad_request, command_context, final_or_queued_response, internal_server_error,
+        redpanda_producer, reply_state,
+    },
     modules::{
         auth::dto::Claim,
         orders::{
@@ -9,6 +14,8 @@ use crate::{
             services::{get_all_open_orders, get_users_market_all_orders},
         },
     },
+    protocol_map::{asset_to_protocol, order_type_to_protocol, side_to_protocol},
+    replies::RequestKind,
     utils::types::ResponseBody,
 };
 
@@ -26,10 +33,59 @@ pub async fn place_order(req: HttpRequest, body: web::Json<PlaceOrder>) -> impl 
         }
     };
 
-    let _user_id = user_extension.userid;
-    let _order_data = body.into_inner();
-    //TODO: HOT-PATH
-    HttpResponse::Ok().body("hi")
+    let order_data = body.into_inner();
+    if order_data.market_id <= 0 {
+        return bad_request("market_id must be greater than zero");
+    }
+    if order_data.quantity <= 0 {
+        return bad_request("quantity must be greater than zero");
+    }
+    if order_data.price < 0 {
+        return bad_request("price cannot be negative");
+    }
+    if order_data.margin <= 0 {
+        return bad_request("margin must be greater than zero");
+    }
+
+    let context = match command_context(&req, user_extension) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let producer = match redpanda_producer(&req) {
+        Ok(producer) => producer,
+        Err(response) => return response,
+    };
+    let reply_state = match reply_state(&req) {
+        Ok(reply_state) => reply_state,
+        Err(response) => return response,
+    };
+    let command = WalletCommand::PlaceOrderIntent(PlaceOrderIntent {
+        envelope: context.envelope,
+        market_id: order_data.market_id,
+        market_name: order_data.market_name,
+        side: side_to_protocol(order_data.side),
+        order_type: order_type_to_protocol(order_data.order_type),
+        quantity: order_data.quantity,
+        price: order_data.price,
+        margin_asset: asset_to_protocol(order_data.margin_asset),
+        required_margin: order_data.margin,
+    });
+    let key = user_extension.userid.to_string();
+    let receiver = reply_state
+        .register_waiter(
+            &context.ack.request_id,
+            user_extension.userid,
+            RequestKind::PlaceOrder,
+        )
+        .await;
+
+    if let Err(error) = producer.publish_wallet_command(&key, &command).await {
+        eprintln!("{error}");
+        reply_state.remove(&context.ack.request_id).await;
+        return internal_server_error("failed to queue wallet command");
+    }
+
+    final_or_queued_response(receiver, context.wait_timeout, context.ack).await
 }
 
 #[delete("/")]
@@ -46,10 +102,47 @@ pub async fn cancel_order(req: HttpRequest, body: web::Json<CancelOrder>) -> imp
         }
     };
 
-    let _user_id = user_extension.userid;
-    let _order_data = body.into_inner();
-    //TODO: HOT-PATH
-    HttpResponse::Ok().body("hi")
+    let order_data = body.into_inner();
+    if order_data.market_id <= 0 {
+        return bad_request("market_id must be greater than zero");
+    }
+    if order_data.order_id <= 0 {
+        return bad_request("order_id must be greater than zero");
+    }
+
+    let context = match command_context(&req, user_extension) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let producer = match redpanda_producer(&req) {
+        Ok(producer) => producer,
+        Err(response) => return response,
+    };
+    let reply_state = match reply_state(&req) {
+        Ok(reply_state) => reply_state,
+        Err(response) => return response,
+    };
+    let command = WalletCommand::CancelOrderIntent(CancelOrderIntent {
+        envelope: context.envelope,
+        market_id: order_data.market_id,
+        order_id: order_data.order_id,
+    });
+    let key = user_extension.userid.to_string();
+    let receiver = reply_state
+        .register_waiter(
+            &context.ack.request_id,
+            user_extension.userid,
+            RequestKind::CancelOrder,
+        )
+        .await;
+
+    if let Err(error) = producer.publish_wallet_command(&key, &command).await {
+        eprintln!("{error}");
+        reply_state.remove(&context.ack.request_id).await;
+        return internal_server_error("failed to queue wallet command");
+    }
+
+    final_or_queued_response(receiver, context.wait_timeout, context.ack).await
 }
 
 #[get("/{market_id}")]

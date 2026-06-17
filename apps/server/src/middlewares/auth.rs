@@ -88,6 +88,12 @@ mod tests {
             server_port: 8080,
             server_host: String::from("127.0.0.1"),
             jwt_secret: String::from("test-secret"),
+            redpanda_brokers: String::from("localhost:9092"),
+            wallet_commands_topic: String::from("wallet.commands"),
+            wallet_replies_topic: String::from("wallet.replies"),
+            engine_replies_topic: String::from("engine.replies"),
+            server_reply_partition: 0,
+            request_wait_timeout_ms: 5000,
         }
     }
 

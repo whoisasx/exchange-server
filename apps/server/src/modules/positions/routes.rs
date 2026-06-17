@@ -14,10 +14,6 @@ pub fn config_position_routes(cfg: &mut web::ServiceConfig) {
                 "/closed/{market_id}",
                 web::get().to(handlers::get_closed_positions),
             )
-            .route(
-                "/close/{market_id}",
-                web::get().to(handlers::get_closed_positions),
-            )
             .service(handlers::close_position),
     );
 }
