@@ -182,6 +182,9 @@ mod tests {
             "../../../docs/streams/examples/engine-place-order.command.json"
         ));
         assert_command_fixture(include_str!(
+            "../../../docs/streams/examples/engine-place-order-reduce-only.command.json"
+        ));
+        assert_command_fixture(include_str!(
             "../../../docs/streams/examples/engine-cancel-order.command.json"
         ));
     }

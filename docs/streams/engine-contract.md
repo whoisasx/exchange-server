@@ -70,7 +70,10 @@ Topic: `engine.commands`
 
 Record key: `market_id`
 
-Fixture: `docs/streams/examples/engine-place-order.command.json`
+Fixtures:
+
+- `docs/streams/examples/engine-place-order.command.json`
+- `docs/streams/examples/engine-place-order-reduce-only.command.json`
 
 Required engine behavior:
 
@@ -79,6 +82,20 @@ Required engine behavior:
 - Publish exactly one `OrderAccepted` or `OrderRejected` reply for the command.
 - If the order rests on the book, publish `OrderOpened`.
 - If the order matches, publish `TradeExecuted`.
+
+Reduce-only conformance cases:
+
+| Case | Expected engine behavior |
+| --- | --- |
+| `reduce_only=false` normal order | Accept or reject using normal order validation. Resting remainder may publish `OrderOpened`. |
+| `reduce_only=true` and user has no reducible position on that market | Publish `OrderRejected`; do not publish order or trade events. |
+| `reduce_only=true` and command quantity exceeds current reducible position quantity | Publish `OrderRejected`; do not cap into a smaller order at command acceptance. |
+| `reduce_only=true` full close with enough liquidity | Publish `OrderAccepted`, publish matching `TradeExecuted`, and do not publish `OrderOpened` for that order. |
+| `reduce_only=true` partial close with enough liquidity for requested quantity | Publish `OrderAccepted`, publish matching `TradeExecuted`, and reduce but do not reverse the position. |
+| `reduce_only=true` with partial liquidity below requested quantity | Publish `OrderAccepted`, publish matching `TradeExecuted` for the matched portion, and expire the unmatched remainder without `OrderOpened`. |
+| `reduce_only=true` where exposure changes while matching | Stop matching before increasing or reversing exposure, then expire any excess remainder without `OrderOpened`. |
+
+The server validates close quantity against the projector's current position snapshot, but that is not authoritative enough for matching. The engine owns final reduce-only enforcement because it has the current orderbook and position state at match time.
 
 ### CancelOrder
 

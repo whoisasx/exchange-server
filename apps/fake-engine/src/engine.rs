@@ -574,6 +574,108 @@ mod tests {
     }
 
     #[test]
+    fn reduce_only_order_matches_without_opening_remainder() {
+        let engine = FakeEngine::new(100, 200);
+        reserve(&engine, "req-1", "res-maker", 1000);
+        reserve(&engine, "req-2", "res-close", 1000);
+        let _ = engine.process_command(EngineCommand::PlaceOrder(order(
+            "req-1",
+            "res-maker",
+            1,
+            Side::LONG,
+            10,
+            100,
+        )));
+
+        let output = engine.process_command(EngineCommand::PlaceOrder(reduce_only_order(
+            "req-2",
+            "res-close",
+            2,
+            Side::SHORT,
+            10,
+            0,
+        )));
+
+        assert!(matches!(
+            output.replies[0].reply,
+            EngineReply::OrderAccepted(OrderAccepted { order_id: 101, .. })
+        ));
+        assert!(
+            output
+                .events
+                .iter()
+                .all(|publication| !matches!(&publication.event, EngineEvent::OrderOpened(_)))
+        );
+        let EngineEvent::TradeExecuted(trade) = &output.events[0].event else {
+            panic!("expected trade event");
+        };
+        assert_eq!(trade.quantity, 10);
+        assert_eq!(trade.maker_order_id, 100);
+        assert_eq!(trade.taker_order_id, 101);
+    }
+
+    #[test]
+    fn reduce_only_partial_match_expires_unmatched_remainder() {
+        let engine = FakeEngine::new(100, 200);
+        reserve(&engine, "req-1", "res-maker", 400);
+        reserve(&engine, "req-2", "res-close", 1000);
+        let _ = engine.process_command(EngineCommand::PlaceOrder(order(
+            "req-1",
+            "res-maker",
+            1,
+            Side::LONG,
+            4,
+            100,
+        )));
+
+        let output = engine.process_command(EngineCommand::PlaceOrder(reduce_only_order(
+            "req-2",
+            "res-close",
+            2,
+            Side::SHORT,
+            10,
+            0,
+        )));
+
+        assert!(
+            output
+                .events
+                .iter()
+                .all(|publication| !matches!(&publication.event, EngineEvent::OrderOpened(_)))
+        );
+        let EngineEvent::TradeExecuted(trade) = &output.events[0].event else {
+            panic!("expected trade event");
+        };
+        assert_eq!(trade.quantity, 4);
+
+        let EngineEvent::OrderBookDelta(delta) = &output.events[1].event else {
+            panic!("expected orderbook delta");
+        };
+        assert_eq!(delta.bids[0].quantity, 0);
+    }
+
+    #[test]
+    fn reduce_only_unmatched_order_does_not_rest() {
+        let engine = FakeEngine::new(100, 200);
+        reserve(&engine, "req-1", "res-close", 1000);
+
+        let output = engine.process_command(EngineCommand::PlaceOrder(reduce_only_order(
+            "req-1",
+            "res-close",
+            2,
+            Side::SHORT,
+            10,
+            0,
+        )));
+
+        assert!(matches!(
+            output.replies[0].reply,
+            EngineReply::OrderAccepted(OrderAccepted { order_id: 100, .. })
+        ));
+        assert!(output.events.is_empty());
+    }
+
+    #[test]
     fn cancel_resting_order_emits_cancel_event() {
         let engine = FakeEngine::new(100, 200);
         reserve(&engine, "req-1", "res-1", 500);
@@ -644,6 +746,24 @@ mod tests {
             price,
             reduce_only: false,
         }
+    }
+
+    fn reduce_only_order(
+        request_id: &str,
+        reservation_id: &str,
+        user_id: i64,
+        side: Side,
+        quantity: i64,
+        price: i64,
+    ) -> ReservedPlaceOrder {
+        let mut order = order(request_id, reservation_id, user_id, side, quantity, price);
+        order.order_type = if price == 0 {
+            OrderType::MARKET
+        } else {
+            OrderType::LIMIT
+        };
+        order.reduce_only = true;
+        order
     }
 
     fn envelope(request_id: &str, user_id: i64) -> CommandEnvelope {
