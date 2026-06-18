@@ -385,12 +385,14 @@ mod tests {
             price: 20,
             margin_asset: Asset::USDC,
             required_margin: 200,
+            reduce_only: true,
         };
 
         let order = intent.into_reserved_order("res-1".to_string());
 
         assert_eq!(order.envelope.idempotency_key, "client-order-1");
         assert_eq!(order.reservation_id, "res-1");
+        assert!(order.reduce_only);
     }
 
     #[test]

@@ -43,6 +43,7 @@ struct StoredOrderContext {
     quantity: i64,
     price: i64,
     margin: i64,
+    reduce_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,9 +121,10 @@ impl ProjectorRepository {
                 side,
                 order_type,
                 quantity,
-                price
+                price,
+                reduce_only
             )
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             ON CONFLICT(reservation_id)
             DO UPDATE
             SET request_id=EXCLUDED.request_id,
@@ -133,6 +135,7 @@ impl ProjectorRepository {
                 order_type=EXCLUDED.order_type,
                 quantity=EXCLUDED.quantity,
                 price=EXCLUDED.price,
+                reduce_only=EXCLUDED.reduce_only,
                 updated_at=NOW()
             "#,
         )
@@ -145,6 +148,7 @@ impl ProjectorRepository {
         .bind(order_type_to_db(order.order_type))
         .bind(order.quantity)
         .bind(order.price)
+        .bind(order.reduce_only)
         .execute(&mut *tx)
         .await?;
 
@@ -1046,7 +1050,8 @@ async fn maybe_context_by_reservation_in_tx(
             c.order_type,
             c.quantity,
             c.price,
-            COALESCE(w.amount, 0) AS margin
+            COALESCE(w.amount, 0) AS margin,
+            c.reduce_only
         FROM projector_order_context c
         LEFT JOIN wallet_reservations w ON w.reservation_id=c.reservation_id
         WHERE c.reservation_id=$1
@@ -1076,7 +1081,8 @@ async fn maybe_context_by_order_id_in_tx(
             c.order_type,
             c.quantity,
             c.price,
-            COALESCE(w.amount, 0) AS margin
+            COALESCE(w.amount, 0) AS margin,
+            c.reduce_only
         FROM projector_order_context c
         LEFT JOIN wallet_reservations w ON w.reservation_id=c.reservation_id
         WHERE c.order_id=$1
@@ -1102,7 +1108,8 @@ async fn maybe_context_by_order_id_in_tx(
             order_type,
             quantity,
             price,
-            margin
+            margin,
+            reduce_only
         FROM orders
         WHERE order_id=$1
         "#,
@@ -1129,6 +1136,7 @@ fn context_from_row(
         quantity: row.get("quantity"),
         price: row.get("price"),
         margin: row.get("margin"),
+        reduce_only: row.get("reduce_only"),
     })
 }
 
@@ -1172,9 +1180,10 @@ async fn insert_order_if_missing_in_tx(
             quantity,
             price,
             status,
-            margin
+            margin,
+            reduce_only
         )
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ON CONFLICT(order_id) DO NOTHING
         "#,
     )
@@ -1188,6 +1197,7 @@ async fn insert_order_if_missing_in_tx(
     .bind(context.price)
     .bind(OrderStatus::PENDING)
     .bind(context.margin)
+    .bind(context.reduce_only)
     .execute(&mut **tx)
     .await?;
 
@@ -1211,15 +1221,17 @@ async fn upsert_order_open_in_tx(
             quantity,
             price,
             status,
-            margin
+            margin,
+            reduce_only
         )
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ON CONFLICT(order_id)
         DO UPDATE
         SET status=CASE
                 WHEN orders.status IN ('FILLED','CANCELLED') THEN orders.status
                 ELSE EXCLUDED.status
             END,
+            reduce_only=EXCLUDED.reduce_only,
             updated_at=NOW()
         "#,
     )
@@ -1233,6 +1245,7 @@ async fn upsert_order_open_in_tx(
     .bind(context.price)
     .bind(OrderStatus::OPEN)
     .bind(context.margin)
+    .bind(context.reduce_only)
     .execute(&mut **tx)
     .await?;
 
@@ -1256,12 +1269,14 @@ async fn upsert_order_cancelled_in_tx(
             quantity,
             price,
             status,
-            margin
+            margin,
+            reduce_only
         )
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ON CONFLICT(order_id)
         DO UPDATE
         SET status=EXCLUDED.status,
+            reduce_only=EXCLUDED.reduce_only,
             updated_at=NOW()
         "#,
     )
@@ -1275,6 +1290,7 @@ async fn upsert_order_cancelled_in_tx(
     .bind(context.price)
     .bind(OrderStatus::CANCELLED)
     .bind(context.margin)
+    .bind(context.reduce_only)
     .execute(&mut **tx)
     .await?;
 

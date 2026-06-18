@@ -75,6 +75,7 @@ Fixture: `docs/streams/examples/engine-place-order.command.json`
 Required engine behavior:
 
 - Validate and accept or reject the order.
+- Treat `reduce_only=true` as a hard constraint: the order must not increase or reverse the user's position. Reject or expire any unmatched remainder that would create exposure.
 - Publish exactly one `OrderAccepted` or `OrderRejected` reply for the command.
 - If the order rests on the book, publish `OrderOpened`.
 - If the order matches, publish `TradeExecuted`.

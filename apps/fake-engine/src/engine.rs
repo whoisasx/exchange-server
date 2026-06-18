@@ -183,6 +183,10 @@ impl FakeEngine {
             });
         }
 
+        if incoming.remaining_quantity > 0 && incoming.reduce_only {
+            return output;
+        }
+
         if incoming.remaining_quantity > 0 {
             let incoming_market_id = incoming.market_id;
             let incoming_side = incoming.side;
@@ -280,6 +284,7 @@ impl EngineState {
             side: command.side,
             remaining_quantity: command.quantity,
             price: command.price,
+            reduce_only: command.reduce_only,
             margin_asset: reservation.asset,
             margin_remaining: reservation.remaining.max(1),
         }
@@ -426,6 +431,7 @@ struct RestingOrder {
     side: Side,
     remaining_quantity: i64,
     price: i64,
+    reduce_only: bool,
     margin_asset: Asset,
     margin_remaining: i64,
 }
@@ -636,6 +642,7 @@ mod tests {
             order_type: OrderType::LIMIT,
             quantity,
             price,
+            reduce_only: false,
         }
     }
 

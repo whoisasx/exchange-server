@@ -69,6 +69,7 @@ pub async fn place_order(req: HttpRequest, body: web::Json<PlaceOrder>) -> impl 
         price: order_data.price,
         margin_asset: asset_to_protocol(order_data.margin_asset),
         required_margin: order_data.margin,
+        reduce_only: false,
     });
     let key = user_extension.userid.to_string();
     let receiver = reply_state

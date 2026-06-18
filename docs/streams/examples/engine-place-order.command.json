@@ -13,6 +13,7 @@
     "side": "LONG",
     "order_type": "LIMIT",
     "quantity": 10,
-    "price": 100
+    "price": 100,
+    "reduce_only": false
   }
 }

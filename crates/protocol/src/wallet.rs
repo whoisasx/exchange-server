@@ -31,6 +31,7 @@ pub struct PlaceOrderIntent {
     pub price: i64,
     pub margin_asset: Asset,
     pub required_margin: i64,
+    pub reduce_only: bool,
 }
 
 impl PlaceOrderIntent {
@@ -44,6 +45,7 @@ impl PlaceOrderIntent {
             order_type: self.order_type,
             quantity: self.quantity,
             price: self.price,
+            reduce_only: self.reduce_only,
         }
     }
 }
@@ -227,6 +229,7 @@ mod tests {
             price: 20,
             margin_asset: Asset::USDC,
             required_margin: 200,
+            reduce_only: true,
         };
 
         let order = intent.into_reserved_order(String::from("res-1"));
@@ -236,6 +239,7 @@ mod tests {
         assert_eq!(order.market_id, 1);
         assert_eq!(order.quantity, 10);
         assert_eq!(order.price, 20);
+        assert!(order.reduce_only);
     }
 
     #[test]

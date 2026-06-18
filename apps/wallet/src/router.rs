@@ -50,6 +50,7 @@ mod tests {
             price: 20,
             margin_asset: Asset::USDC,
             required_margin: 200,
+            reduce_only: false,
         };
 
         let action = route_command(WalletCommand::PlaceOrderIntent(intent));

@@ -637,6 +637,7 @@ mod tests {
                 price: 20,
                 margin_asset: Asset::USDC,
                 required_margin: 200,
+                reduce_only: false,
             }
             .into_reserved_order(String::from("res-1")),
         );

@@ -193,6 +193,64 @@ async fn main() -> Result<()> {
     wait_for_unlocked_balances(&pool, alice.userid, bob.userid).await?;
     wait_for_ledger_entries(&pool, alice.userid, bob.userid).await?;
 
+    let charlie = signup(&client, &settings.server_url, &format!("charlie-{run_id}")).await?;
+    println!(
+        "created smoke liquidity user {}={}",
+        charlie.username, charlie.userid
+    );
+    command(
+        &client,
+        &settings.server_url,
+        &charlie.jwt_token,
+        &format!("deposit-charlie-{run_id}"),
+        "/balance/",
+        json!({"asset":"USDC","amount":10000,"reference_id":format!("deposit-charlie-{run_id}")}),
+    )
+    .await
+    .context("charlie deposit failed")?;
+    command(
+        &client,
+        &settings.server_url,
+        &charlie.jwt_token,
+        &format!("order-charlie-close-liquidity-{run_id}"),
+        "/orders/",
+        json!({
+            "market_id": MARKET_ID,
+            "market_name": MARKET_NAME,
+            "side": "LONG",
+            "order_type": "LIMIT",
+            "quantity": 10,
+            "price": 100,
+            "margin": 1000,
+            "margin_asset": "USDC"
+        }),
+    )
+    .await
+    .context("charlie close-liquidity order failed")?;
+    command(
+        &client,
+        &settings.server_url,
+        &alice.jwt_token,
+        &format!("close-alice-{run_id}"),
+        "/positions/close",
+        json!({
+            "market_id": MARKET_ID,
+            "price": 0
+        }),
+    )
+    .await
+    .context("alice close position failed")?;
+
+    wait_for_no_open_position_api(&client, &settings.server_url, &alice.jwt_token).await?;
+    wait_for_closed_position_api(
+        &client,
+        &settings.server_url,
+        &alice.jwt_token,
+        alice.userid,
+    )
+    .await?;
+    wait_for_reduce_only_close_order(&pool, alice.userid).await?;
+
     println!("e2e smoke passed");
     Ok(())
 }
@@ -747,6 +805,95 @@ fn is_expected_position(value: &Value, user_id: i64, side: &str) -> bool {
         && value.get("initial_margin").and_then(Value::as_i64) == Some(1000)
 }
 
+async fn wait_for_no_open_position_api(
+    client: &Client,
+    server_url: &str,
+    token: &str,
+) -> Result<()> {
+    let url = format!("{server_url}/positions/open/{MARKET_ID}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        let response = client
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("open position api request failed")?;
+
+        if response.status().is_success() {
+            let payload = response
+                .json::<ApiResponse<Value>>()
+                .await
+                .context("open position api response was not valid JSON")?;
+            if payload.success && payload.body.is_none() {
+                return Ok(());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for closed open position");
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn wait_for_closed_position_api(
+    client: &Client,
+    server_url: &str,
+    token: &str,
+    user_id: i64,
+) -> Result<()> {
+    let url = format!("{server_url}/positions/closed/{MARKET_ID}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        let response = client
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("closed position api request failed")?;
+
+        if response.status().is_success() {
+            let payload = response
+                .json::<ApiResponse<Vec<Value>>>()
+                .await
+                .context("closed position api response was not valid JSON")?;
+            if payload.success
+                && payload
+                    .body
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|position| is_expected_closed_position(position, user_id))
+            {
+                return Ok(());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for closed position");
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+fn is_expected_closed_position(value: &Value, user_id: i64) -> bool {
+    value.get("user_id").and_then(Value::as_i64) == Some(user_id)
+        && value.get("market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+        && value.get("side").and_then(Value::as_str) == Some("LONG")
+        && value.get("quantity").and_then(Value::as_i64) == Some(10)
+        && value.get("entry_price").and_then(Value::as_i64) == Some(100)
+        && value.get("exit_price").and_then(Value::as_i64) == Some(100)
+        && value.get("realized_pnl").and_then(Value::as_i64) == Some(0)
+        && value
+            .get("close_order_id")
+            .and_then(Value::as_i64)
+            .is_some_and(|order_id| order_id > 0)
+}
+
 async fn wait_for_filled_orders(pool: &Pool<Postgres>, alice: i64, bob: i64) -> Result<()> {
     wait_for_db("filled orders", || async {
         let count = sqlx::query_scalar::<_, i64>(
@@ -762,6 +909,29 @@ async fn wait_for_filled_orders(pool: &Pool<Postgres>, alice: i64, bob: i64) -> 
         .fetch_one(pool)
         .await?;
         Ok(count == 2)
+    })
+    .await
+}
+
+async fn wait_for_reduce_only_close_order(pool: &Pool<Postgres>, user_id: i64) -> Result<()> {
+    wait_for_db("reduce-only close order", || async {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM orders
+            WHERE user_id=$1
+              AND market_id=$2
+              AND side='SHORT'
+              AND quantity=10
+              AND status='FILLED'
+              AND reduce_only=true
+            "#,
+        )
+        .bind(user_id)
+        .bind(MARKET_ID)
+        .fetch_one(pool)
+        .await?;
+        Ok(count >= 1)
     })
     .await
 }

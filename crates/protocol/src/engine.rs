@@ -23,6 +23,7 @@ pub struct ReservedPlaceOrder {
     pub order_type: OrderType,
     pub quantity: i64,
     pub price: i64,
+    pub reduce_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
