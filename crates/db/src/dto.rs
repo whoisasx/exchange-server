@@ -152,7 +152,7 @@ pub struct FillRow {
     pub created_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(sqlx::FromRow, Serialize, std::fmt::Debug)]
 pub struct CandleRow {
     pub market_id: i64,
     pub interval: String,
