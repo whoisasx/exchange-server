@@ -2675,6 +2675,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "timeseries"
+version = "0.1.0"
+dependencies = [
+ "db",
+ "dotenvy",
+ "protocol",
+ "rskafka",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

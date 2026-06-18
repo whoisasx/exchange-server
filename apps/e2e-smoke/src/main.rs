@@ -1,4 +1,4 @@
-use std::{env, time::Duration};
+use std::{collections::BTreeSet, env, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
@@ -157,6 +157,8 @@ async fn main() -> Result<()> {
     .await?;
 
     wait_for_projected_fill(&pool, alice.userid, bob.userid).await?;
+    wait_for_candles(&pool).await?;
+    wait_for_candle_api(&client, &settings.server_url).await?;
     wait_for_filled_orders(&pool, alice.userid, bob.userid).await?;
     wait_for_unlocked_balances(&pool, alice.userid, bob.userid).await?;
     wait_for_ledger_entries(&pool, alice.userid, bob.userid).await?;
@@ -442,6 +444,7 @@ fn is_account_trade(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some("AccountEvent")
         && value.pointer("/payload/source").and_then(Value::as_str) == Some("engine")
         && value.pointer("/payload/event/type").and_then(Value::as_str) == Some("TradeExecuted")
+        && has_engine_sequence(value)
 }
 
 fn is_market_trade(value: &Value) -> bool {
@@ -449,6 +452,18 @@ fn is_market_trade(value: &Value) -> bool {
         && value.pointer("/payload/source").and_then(Value::as_str) == Some("engine")
         && value.pointer("/payload/market_id").and_then(Value::as_i64) == Some(MARKET_ID)
         && value.pointer("/payload/event/type").and_then(Value::as_str) == Some("TradeExecuted")
+        && has_engine_sequence(value)
+}
+
+fn has_engine_sequence(value: &Value) -> bool {
+    value
+        .pointer("/payload/event/payload/engine_sequence")
+        .and_then(Value::as_i64)
+        .is_some_and(|sequence| sequence > 0)
+        && value
+            .pointer("/payload/event/payload/engine_timestamp_ms")
+            .and_then(Value::as_i64)
+            .is_some_and(|timestamp| timestamp > 0)
 }
 
 fn is_wallet_settlement(value: &Value) -> bool {
@@ -464,15 +479,117 @@ async fn wait_for_projected_fill(pool: &Pool<Postgres>, alice: i64, bob: i64) ->
             SELECT COUNT(*)::BIGINT
             FROM fills
             WHERE maker_id=$1 AND taker_id=$2
+              AND market_id=$3
+              AND engine_sequence > 0
+              AND executed_at IS NOT NULL
             "#,
         )
         .bind(alice)
         .bind(bob)
+        .bind(MARKET_ID)
         .fetch_one(pool)
         .await?;
         Ok(count >= 1)
     })
     .await
+}
+
+async fn wait_for_candles(pool: &Pool<Postgres>) -> Result<()> {
+    wait_for_db("candles", || async {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+              interval,
+              open,
+              high,
+              low,
+              close,
+              volume,
+              trade_count,
+              first_engine_sequence,
+              last_engine_sequence
+            FROM candles
+            WHERE market_id=$1
+            "#,
+        )
+        .bind(MARKET_ID)
+        .fetch_all(pool)
+        .await?;
+
+        let intervals = rows
+            .iter()
+            .map(|row| row.get::<String, _>("interval"))
+            .collect::<BTreeSet<_>>();
+        let expected = ["1m", "5m", "15m", "1h", "1d"]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>();
+
+        Ok(rows.len() == expected.len()
+            && intervals == expected
+            && rows.iter().all(|row| {
+                row.get::<i64, _>("open") == 100
+                    && row.get::<i64, _>("high") == 100
+                    && row.get::<i64, _>("low") == 100
+                    && row.get::<i64, _>("close") == 100
+                    && row.get::<i64, _>("volume") == 10
+                    && row.get::<i64, _>("trade_count") == 1
+                    && row.get::<i64, _>("first_engine_sequence") > 0
+                    && row.get::<i64, _>("last_engine_sequence")
+                        >= row.get::<i64, _>("first_engine_sequence")
+            }))
+    })
+    .await
+}
+
+async fn wait_for_candle_api(client: &Client, server_url: &str) -> Result<()> {
+    let url = format!("{server_url}/markets/{MARKET_ID}/candles?interval=1m&limit=10");
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .context("candle api request failed")?;
+
+        if response.status().is_success() {
+            let payload = response
+                .json::<ApiResponse<Vec<Value>>>()
+                .await
+                .context("candle api response was not valid JSON")?;
+            if payload.success
+                && payload
+                    .body
+                    .unwrap_or_default()
+                    .iter()
+                    .any(is_expected_candle)
+            {
+                return Ok(());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for candle api");
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+fn is_expected_candle(value: &Value) -> bool {
+    value.get("market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+        && value.get("interval").and_then(Value::as_str) == Some("1m")
+        && value.get("open").and_then(Value::as_i64) == Some(100)
+        && value.get("high").and_then(Value::as_i64) == Some(100)
+        && value.get("low").and_then(Value::as_i64) == Some(100)
+        && value.get("close").and_then(Value::as_i64) == Some(100)
+        && value.get("volume").and_then(Value::as_i64) == Some(10)
+        && value.get("trade_count").and_then(Value::as_i64) == Some(1)
+        && value
+            .get("first_engine_sequence")
+            .and_then(Value::as_i64)
+            .is_some_and(|sequence| sequence > 0)
 }
 
 async fn wait_for_filled_orders(pool: &Pool<Postgres>, alice: i64, bob: i64) -> Result<()> {

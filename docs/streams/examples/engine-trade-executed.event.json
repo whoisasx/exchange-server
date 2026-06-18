@@ -1,6 +1,8 @@
 {
   "type": "TradeExecuted",
   "payload": {
+    "engine_sequence": 3,
+    "engine_timestamp_ms": 1710000002000,
     "fill_id": 7001,
     "market_id": 1,
     "price": 100,

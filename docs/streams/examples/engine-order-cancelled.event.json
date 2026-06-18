@@ -1,6 +1,8 @@
 {
   "type": "OrderCancelled",
   "payload": {
+    "engine_sequence": 2,
+    "engine_timestamp_ms": 1710000001000,
     "order_id": 9001,
     "reservation_id": "res_place_001",
     "user_id": 42,

@@ -328,6 +328,8 @@ impl ProjectorRepository {
             r#"
             INSERT INTO fills(
                 fill_id,
+                market_id,
+                engine_sequence,
                 maker_id,
                 taker_id,
                 maker_order_id,
@@ -335,13 +337,16 @@ impl ProjectorRepository {
                 price,
                 quantity,
                 maker_position,
-                taker_position
+                taker_position,
+                executed_at
             )
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TO_TIMESTAMP($12::DOUBLE PRECISION / 1000.0))
             ON CONFLICT(fill_id) DO NOTHING
             "#,
         )
         .bind(event.fill_id)
+        .bind(event.market_id)
+        .bind(event.engine_sequence)
         .bind(maker.user_id)
         .bind(taker.user_id)
         .bind(event.maker_order_id)
@@ -350,6 +355,7 @@ impl ProjectorRepository {
         .bind(event.quantity)
         .bind(maker.side)
         .bind(taker.side)
+        .bind(event.engine_timestamp_ms)
         .execute(&mut *tx)
         .await?;
 

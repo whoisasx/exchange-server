@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use protocol::{
@@ -76,6 +77,8 @@ impl FakeEngine {
                         events: vec![EventPublication {
                             key: cancel.market_id.to_string(),
                             event: EngineEvent::OrderCancelled(OrderCancelled {
+                                engine_sequence: state.next_engine_sequence(order.market_id),
+                                engine_timestamp_ms: unix_timestamp_ms(),
                                 order_id: order.order_id,
                                 reservation_id: order.reservation_id,
                                 user_id: order.user_id,
@@ -155,6 +158,8 @@ impl FakeEngine {
             output.events.push(EventPublication {
                 key: incoming.market_id.to_string(),
                 event: EngineEvent::OrderOpened(OrderOpened {
+                    engine_sequence: state.next_engine_sequence(incoming.market_id),
+                    engine_timestamp_ms: unix_timestamp_ms(),
                     order_id: incoming.order_id,
                     reservation_id: incoming.reservation_id.clone(),
                     user_id: incoming.user_id,
@@ -172,6 +177,7 @@ impl FakeEngine {
 struct EngineState {
     next_order_id: i64,
     next_fill_id: i64,
+    market_sequences: HashMap<i64, i64>,
     reservations: HashMap<String, ReservationInfo>,
     resting_orders: HashMap<i64, RestingOrder>,
 }
@@ -187,6 +193,12 @@ impl EngineState {
         let fill_id = self.next_fill_id;
         self.next_fill_id += 1;
         fill_id
+    }
+
+    fn next_engine_sequence(&mut self, market_id: i64) -> i64 {
+        let sequence = self.market_sequences.entry(market_id).or_insert(0);
+        *sequence += 1;
+        *sequence
     }
 
     fn record_reservation(&mut self, event: WalletFundsReserved) {
@@ -271,6 +283,8 @@ impl EngineState {
         self.decrease_reservation(&taker.reservation_id, taker_debit);
 
         TradeExecuted {
+            engine_sequence: self.next_engine_sequence(maker.market_id),
+            engine_timestamp_ms: unix_timestamp_ms(),
             fill_id: self.next_fill_id(),
             market_id: maker.market_id,
             price: fill_price,
@@ -304,6 +318,13 @@ impl EngineState {
         self.decrease_reservation(&order.reservation_id, order.margin_remaining);
         Some(order)
     }
+}
+
+fn unix_timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time is before UNIX_EPOCH")
+        .as_millis() as i64
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -404,7 +425,11 @@ mod tests {
         ));
         assert!(matches!(
             output.events[0].event,
-            EngineEvent::OrderOpened(OrderOpened { order_id: 100, .. })
+            EngineEvent::OrderOpened(OrderOpened {
+                engine_sequence: 1,
+                order_id: 100,
+                ..
+            })
         ));
     }
 
@@ -441,6 +466,8 @@ mod tests {
         };
 
         assert_eq!(trade.fill_id, 200);
+        assert_eq!(trade.engine_sequence, 2);
+        assert!(trade.engine_timestamp_ms > 0);
         assert_eq!(trade.maker_order_id, 100);
         assert_eq!(trade.taker_order_id, 101);
         assert_eq!(trade.maker_user_id, 1);
@@ -476,6 +503,7 @@ mod tests {
         assert!(matches!(
             output.events[0].event,
             EngineEvent::OrderCancelled(OrderCancelled {
+                engine_sequence: 2,
                 order_id: 100,
                 released_amount: 500,
                 ..

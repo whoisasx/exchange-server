@@ -12,7 +12,7 @@ use crate::{
 
 use crate::modules::{
     auth::{self},
-    balances, fills, orders, positions, requests, users,
+    balances, fills, markets, orders, positions, requests, users,
 };
 
 mod hot_path;
@@ -66,6 +66,7 @@ async fn main() -> std::io::Result<()> {
                     .configure(auth::routes::config_auth_routes)
                     .configure(balances::routes::config_balance_routes)
                     .configure(fills::routes::config_fills_routes)
+                    .configure(markets::routes::config_market_routes)
                     .configure(orders::routes::config_orders_routes)
                     .configure(positions::routes::config_position_routes)
                     .configure(requests::routes::config_request_routes)

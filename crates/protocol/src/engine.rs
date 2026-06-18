@@ -78,6 +78,8 @@ pub enum EngineEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderOpened {
+    pub engine_sequence: i64,
+    pub engine_timestamp_ms: i64,
     pub order_id: i64,
     pub reservation_id: String,
     pub user_id: i64,
@@ -86,6 +88,8 @@ pub struct OrderOpened {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderCancelled {
+    pub engine_sequence: i64,
+    pub engine_timestamp_ms: i64,
     pub order_id: i64,
     pub reservation_id: String,
     pub user_id: i64,
@@ -95,6 +99,8 @@ pub struct OrderCancelled {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradeExecuted {
+    pub engine_sequence: i64,
+    pub engine_timestamp_ms: i64,
     pub fill_id: i64,
     pub market_id: i64,
     pub price: i64,
@@ -130,6 +136,8 @@ mod tests {
             r#"{
                 "type":"TradeExecuted",
                 "payload":{
+                    "engine_sequence":1,
+                    "engine_timestamp_ms":1710000000000,
                     "fill_id":1,
                     "market_id":2,
                     "price":100,

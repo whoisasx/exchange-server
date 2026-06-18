@@ -1,3 +1,4 @@
+pub mod candles;
 pub mod closed_position_fills;
 pub mod closed_positions;
 pub mod collaterals;

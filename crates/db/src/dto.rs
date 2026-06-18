@@ -135,9 +135,11 @@ pub struct ClosedPositionRow {
     pub close_reason: CloseType,
 }
 
-#[derive(Serialize)]
+#[derive(sqlx::FromRow, Serialize)]
 pub struct FillRow {
     pub fill_id: i64,
+    pub market_id: i64,
+    pub engine_sequence: i64,
     pub maker_id: i64,
     pub taker_id: i64,
     pub maker_order_id: i64,
@@ -146,5 +148,23 @@ pub struct FillRow {
     pub quantity: i64,
     pub maker_position: SideType,
     pub taker_position: SideType,
+    pub executed_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, sqlx::FromRow, Serialize)]
+pub struct CandleRow {
+    pub market_id: i64,
+    pub interval: String,
+    pub bucket_start: DateTime<Utc>,
+    pub open: i64,
+    pub high: i64,
+    pub low: i64,
+    pub close: i64,
+    pub volume: i64,
+    pub trade_count: i64,
+    pub first_engine_sequence: i64,
+    pub last_engine_sequence: i64,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
 }

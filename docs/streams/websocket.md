@@ -67,3 +67,5 @@ Market updates are sent only after subscribing to a market:
 ```
 
 The service starts from latest Redpanda offsets. Clients should fetch initial state from REST endpoints before opening a socket.
+
+Engine event payloads are forwarded unchanged, including `engine_sequence` and `engine_timestamp_ms`. Clients that combine snapshots with live market updates should use the engine sequence from the payload for ordering, not websocket receive time.

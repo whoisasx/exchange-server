@@ -647,6 +647,8 @@ mod tests {
     fn engine_cancel_event_releases_reservation() {
         let commands =
             wallet_commands_from_engine_event(EngineEvent::OrderCancelled(OrderCancelled {
+                engine_sequence: 1,
+                engine_timestamp_ms: 1_710_000_000_000,
                 order_id: 99,
                 reservation_id: String::from("res-1"),
                 user_id: 42,
@@ -668,6 +670,8 @@ mod tests {
     fn engine_trade_event_becomes_settlement_commands() {
         let commands =
             wallet_commands_from_engine_event(EngineEvent::TradeExecuted(TradeExecuted {
+                engine_sequence: 1,
+                engine_timestamp_ms: 1_710_000_000_000,
                 fill_id: 7,
                 market_id: 1,
                 price: 100,

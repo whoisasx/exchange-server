@@ -8,6 +8,7 @@ members = [
   "apps/ledger",
   "apps/projector",
   "apps/wallet",
+  "apps/timeseries",
   "apps/ws",
   "crates/config",
   "crates/db",

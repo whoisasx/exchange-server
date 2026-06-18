@@ -23,7 +23,7 @@ All stream messages are JSON encoded with this shape:
 | --- | --- | --- |
 | `engine.commands` | wallet service | C++ engine |
 | `engine.replies` | C++ engine | server reply consumer |
-| `engine.events` | C++ engine | wallet service, projector, websocket, ledger |
+| `engine.events` | C++ engine | wallet service, projector, websocket, ledger, timeseries |
 
 ## Partition Keys
 
@@ -35,6 +35,8 @@ All stream messages are JSON encoded with this shape:
 
 Engine events must be self-routeable by payload. WebSocket consumers must not need database lookups to identify the affected account or market.
 
+`engine.events` ordering is defined by the engine payload, not by consumer receive time. For every `market_id`, the engine must emit a strictly increasing `engine_sequence` on every event for that market. Redpanda offsets are still used by consumers for replay progress, but consumers should use `engine_sequence` when reconstructing market state.
+
 ## Common Types
 
 Enums are serialized as exact uppercase strings:
@@ -45,7 +47,7 @@ Side: LONG, SHORT
 OrderType: LIMIT, MARKET
 ```
 
-All IDs, price, quantity, amount, and margin fields are integer values compatible with signed 64-bit integers.
+All IDs, sequence, timestamp, price, quantity, amount, and margin fields are integer values compatible with signed 64-bit integers.
 
 `CommandEnvelope` is carried from server to wallet to engine:
 
@@ -116,6 +118,15 @@ CancelRejected: request_id, order_id, reason
 
 Events go to `engine.events` and should be keyed by `market_id`.
 
+All engine events include:
+
+```text
+engine_sequence: strictly increasing per market_id
+engine_timestamp_ms: Unix epoch milliseconds assigned by the engine
+```
+
+For ordering, consumers should trust `engine_sequence` before `engine_timestamp_ms`. Timestamps are for bucketing, display, and latency analysis.
+
 | Event | Fixture |
 | --- | --- |
 | `OrderOpened` | `docs/streams/examples/engine-order-opened.event.json` |
@@ -125,9 +136,9 @@ Events go to `engine.events` and should be keyed by `market_id`.
 Event routing fields:
 
 ```text
-OrderOpened: order_id, reservation_id, user_id, market_id
-OrderCancelled: order_id, reservation_id, user_id, market_id, released_amount
-TradeExecuted: fill_id, market_id, price, quantity, maker_order_id, taker_order_id, maker_user_id, taker_user_id, maker_reservation_id, taker_reservation_id, settlements
+OrderOpened: engine_sequence, engine_timestamp_ms, order_id, reservation_id, user_id, market_id
+OrderCancelled: engine_sequence, engine_timestamp_ms, order_id, reservation_id, user_id, market_id, released_amount
+TradeExecuted: engine_sequence, engine_timestamp_ms, fill_id, market_id, price, quantity, maker_order_id, taker_order_id, maker_user_id, taker_user_id, maker_reservation_id, taker_reservation_id, settlements
 ```
 
 Event consumers use these events as follows:
@@ -137,8 +148,11 @@ Event consumers use these events as follows:
 - Projector consumes all engine events to update DB read models.
 - WebSocket consumes all engine events for live user and market updates.
 - Ledger may consume engine events for audit context, while wallet events remain the accounting source.
+- Timeseries consumes `TradeExecuted` to build market candles from engine timestamps.
 
 `TradeExecuted.settlements` is the wallet-facing settlement instruction. Each settlement becomes a wallet `SettleTrade` command.
+
+Future orderbook snapshots and deltas must use the same per-market sequence. A snapshot should carry the latest applied `engine_sequence`, and clients should apply only live deltas with a greater sequence after loading that snapshot.
 
 ## Compatibility Rules
 
