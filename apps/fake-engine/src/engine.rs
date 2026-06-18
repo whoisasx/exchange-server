@@ -8,8 +8,8 @@ use protocol::{
     common::{Asset, Side},
     engine::{
         CancelAccepted, CancelRejected, EngineCommand, EngineEvent, EngineReply, OrderAccepted,
-        OrderCancelled, OrderOpened, OrderRejected, ReservedPlaceOrder, TradeExecuted,
-        TradeSettlement,
+        OrderBookDelta, OrderBookLevel, OrderCancelled, OrderOpened, OrderRejected,
+        ReservedPlaceOrder, TradeExecuted, TradeSettlement,
     },
     wallet::{WalletEvent, WalletFundsReserved},
 };
@@ -65,16 +65,10 @@ impl FakeEngine {
                 let mut state = self.state.lock().expect("fake engine state poisoned");
 
                 if let Some(order) = state.cancel_order(cancel.order_id, cancel.market_id) {
-                    FakeEngineOutput {
-                        replies: vec![ReplyPublication {
-                            partition: cancel.envelope.reply_partition,
-                            key: cancel.envelope.request_id.clone(),
-                            reply: EngineReply::CancelAccepted(CancelAccepted {
-                                request_id: cancel.envelope.request_id,
-                                order_id: cancel.order_id,
-                            }),
-                        }],
-                        events: vec![EventPublication {
+                    let level_quantity =
+                        state.aggregate_quantity(order.market_id, order.side, order.price);
+                    let events = vec![
+                        EventPublication {
                             key: cancel.market_id.to_string(),
                             event: EngineEvent::OrderCancelled(OrderCancelled {
                                 engine_sequence: state.next_engine_sequence(order.market_id),
@@ -85,7 +79,28 @@ impl FakeEngine {
                                 market_id: order.market_id,
                                 released_amount: order.margin_remaining.max(1),
                             }),
+                        },
+                        EventPublication {
+                            key: cancel.market_id.to_string(),
+                            event: state.orderbook_delta_for_level(
+                                order.market_id,
+                                order.side,
+                                order.price,
+                                level_quantity,
+                            ),
+                        },
+                    ];
+
+                    FakeEngineOutput {
+                        replies: vec![ReplyPublication {
+                            partition: cancel.envelope.reply_partition,
+                            key: cancel.envelope.request_id.clone(),
+                            reply: EngineReply::CancelAccepted(CancelAccepted {
+                                request_id: cancel.envelope.request_id,
+                                order_id: cancel.order_id,
+                            }),
                         }],
+                        events,
                     }
                 } else {
                     FakeEngineOutput {
@@ -142,6 +157,9 @@ impl FakeEngine {
                 .resting_orders
                 .remove(&maker_order_id)
                 .expect("matching order should exist");
+            let maker_market_id = maker.market_id;
+            let maker_side = maker.side;
+            let maker_price = maker.price;
             let fill = state.execute_fill(&mut maker, &mut incoming);
 
             output.events.push(EventPublication {
@@ -152,21 +170,46 @@ impl FakeEngine {
             if maker.remaining_quantity > 0 {
                 state.resting_orders.insert(maker.order_id, maker);
             }
+
+            let level_quantity = state.aggregate_quantity(maker_market_id, maker_side, maker_price);
+            output.events.push(EventPublication {
+                key: maker_market_id.to_string(),
+                event: state.orderbook_delta_for_level(
+                    maker_market_id,
+                    maker_side,
+                    maker_price,
+                    level_quantity,
+                ),
+            });
         }
 
         if incoming.remaining_quantity > 0 {
+            let incoming_market_id = incoming.market_id;
+            let incoming_side = incoming.side;
+            let incoming_price = incoming.price;
             output.events.push(EventPublication {
-                key: incoming.market_id.to_string(),
+                key: incoming_market_id.to_string(),
                 event: EngineEvent::OrderOpened(OrderOpened {
-                    engine_sequence: state.next_engine_sequence(incoming.market_id),
+                    engine_sequence: state.next_engine_sequence(incoming_market_id),
                     engine_timestamp_ms: unix_timestamp_ms(),
                     order_id: incoming.order_id,
                     reservation_id: incoming.reservation_id.clone(),
                     user_id: incoming.user_id,
-                    market_id: incoming.market_id,
+                    market_id: incoming_market_id,
                 }),
             });
             state.resting_orders.insert(incoming.order_id, incoming);
+            let level_quantity =
+                state.aggregate_quantity(incoming_market_id, incoming_side, incoming_price);
+            output.events.push(EventPublication {
+                key: incoming_market_id.to_string(),
+                event: state.orderbook_delta_for_level(
+                    incoming_market_id,
+                    incoming_side,
+                    incoming_price,
+                    level_quantity,
+                ),
+            });
         }
 
         output
@@ -318,6 +361,38 @@ impl EngineState {
         self.decrease_reservation(&order.reservation_id, order.margin_remaining);
         Some(order)
     }
+
+    fn aggregate_quantity(&self, market_id: i64, side: Side, price: i64) -> i64 {
+        self.resting_orders
+            .values()
+            .filter(|order| {
+                order.market_id == market_id && order.side == side && order.price == price
+            })
+            .map(|order| order.remaining_quantity)
+            .sum()
+    }
+
+    fn orderbook_delta_for_level(
+        &mut self,
+        market_id: i64,
+        side: Side,
+        price: i64,
+        quantity: i64,
+    ) -> EngineEvent {
+        let level = OrderBookLevel { price, quantity };
+        let (bids, asks) = match side {
+            Side::LONG => (vec![level], Vec::new()),
+            Side::SHORT => (Vec::new(), vec![level]),
+        };
+
+        EngineEvent::OrderBookDelta(OrderBookDelta {
+            engine_sequence: self.next_engine_sequence(market_id),
+            engine_timestamp_ms: unix_timestamp_ms(),
+            market_id,
+            bids,
+            asks,
+        })
+    }
 }
 
 fn unix_timestamp_ms() -> i64 {
@@ -431,6 +506,14 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(
+            output.events[1].event,
+            EngineEvent::OrderBookDelta(OrderBookDelta {
+                engine_sequence: 2,
+                market_id: 1,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -466,7 +549,7 @@ mod tests {
         };
 
         assert_eq!(trade.fill_id, 200);
-        assert_eq!(trade.engine_sequence, 2);
+        assert_eq!(trade.engine_sequence, 3);
         assert!(trade.engine_timestamp_ms > 0);
         assert_eq!(trade.maker_order_id, 100);
         assert_eq!(trade.taker_order_id, 101);
@@ -475,6 +558,13 @@ mod tests {
         assert_eq!(trade.quantity, 10);
         assert_eq!(trade.settlements.len(), 2);
         assert_eq!(trade.settlements[0].debit_amount, 1000);
+
+        let EngineEvent::OrderBookDelta(delta) = &output.events[1].event else {
+            panic!("expected orderbook delta");
+        };
+        assert_eq!(delta.engine_sequence, 4);
+        assert_eq!(delta.bids[0].price, 100);
+        assert_eq!(delta.bids[0].quantity, 0);
     }
 
     #[test]
@@ -503,9 +593,17 @@ mod tests {
         assert!(matches!(
             output.events[0].event,
             EngineEvent::OrderCancelled(OrderCancelled {
-                engine_sequence: 2,
+                engine_sequence: 3,
                 order_id: 100,
                 released_amount: 500,
+                ..
+            })
+        ));
+        assert!(matches!(
+            output.events[1].event,
+            EngineEvent::OrderBookDelta(OrderBookDelta {
+                engine_sequence: 4,
+                market_id: 1,
                 ..
             })
         ));

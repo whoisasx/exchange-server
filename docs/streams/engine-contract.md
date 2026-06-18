@@ -132,6 +132,7 @@ For ordering, consumers should trust `engine_sequence` before `engine_timestamp_
 | `OrderOpened` | `docs/streams/examples/engine-order-opened.event.json` |
 | `OrderCancelled` | `docs/streams/examples/engine-order-cancelled.event.json` |
 | `TradeExecuted` | `docs/streams/examples/engine-trade-executed.event.json` |
+| `OrderBookDelta` | `docs/streams/examples/engine-orderbook-delta.event.json` |
 
 Event routing fields:
 
@@ -139,6 +140,7 @@ Event routing fields:
 OrderOpened: engine_sequence, engine_timestamp_ms, order_id, reservation_id, user_id, market_id
 OrderCancelled: engine_sequence, engine_timestamp_ms, order_id, reservation_id, user_id, market_id, released_amount
 TradeExecuted: engine_sequence, engine_timestamp_ms, fill_id, market_id, price, quantity, maker_order_id, taker_order_id, maker_user_id, taker_user_id, maker_reservation_id, taker_reservation_id, settlements
+OrderBookDelta: engine_sequence, engine_timestamp_ms, market_id, bids, asks
 ```
 
 Event consumers use these events as follows:
@@ -149,10 +151,13 @@ Event consumers use these events as follows:
 - WebSocket consumes all engine events for live user and market updates.
 - Ledger may consume engine events for audit context, while wallet events remain the accounting source.
 - Timeseries consumes `TradeExecuted` to build market candles from engine timestamps.
+- Projector consumes `OrderBookDelta` to maintain REST orderbook snapshots.
 
 `TradeExecuted.settlements` is the wallet-facing settlement instruction. Each settlement becomes a wallet `SettleTrade` command.
 
-Future orderbook snapshots and deltas must use the same per-market sequence. A snapshot should carry the latest applied `engine_sequence`, and clients should apply only live deltas with a greater sequence after loading that snapshot.
+`OrderBookDelta` is price-level based. `bids` are LONG-side levels, `asks` are SHORT-side levels, and `quantity=0` means delete that price level.
+
+Orderbook snapshots and deltas use the same per-market sequence. A snapshot carries the latest applied `engine_sequence`. Clients that need a gap-free orderbook should connect to websocket first, subscribe to the market, buffer live `OrderBookDelta` messages, then fetch the REST snapshot. After the snapshot is loaded, discard buffered deltas with `engine_sequence <= snapshot.engine_sequence` and apply only greater sequences.
 
 ## Compatibility Rules
 

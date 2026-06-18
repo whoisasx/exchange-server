@@ -3,7 +3,7 @@ use db::dto::CandleRow;
 use serde::Deserialize;
 
 use crate::{
-    modules::markets::services::{MarketServiceError, get_candles},
+    modules::markets::services::{MarketServiceError, get_candles, get_orderbook},
     utils::types::ResponseBody,
 };
 
@@ -13,6 +13,11 @@ pub struct CandleQuery {
     start_ms: Option<i64>,
     end_ms: Option<i64>,
     limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrderBookQuery {
+    depth: Option<i64>,
 }
 
 #[get("/{market_id}/candles")]
@@ -41,6 +46,7 @@ pub async fn get_market_candles(
         }),
         Err(MarketServiceError::InvalidInterval) => bad_request("unsupported candle interval"),
         Err(MarketServiceError::InvalidLimit) => bad_request("limit must be between 1 and 1000"),
+        Err(MarketServiceError::InvalidDepth) => bad_request("depth must be between 1 and 200"),
         Err(MarketServiceError::InvalidTimestamp) => {
             bad_request("start_ms and end_ms must be valid unix milliseconds")
         }
@@ -54,6 +60,34 @@ pub async fn get_market_candles(
                 body: None,
             })
         }
+    }
+}
+
+#[get("/{market_id}/orderbook")]
+pub async fn get_orderbook_snapshot(
+    path: web::Path<i64>,
+    query: web::Query<OrderBookQuery>,
+) -> impl Responder {
+    let market_id = path.into_inner();
+    if market_id <= 0 {
+        return bad_request("market_id must be greater than zero");
+    }
+
+    match get_orderbook(market_id, query.depth).await {
+        Ok(snapshot) => HttpResponse::Ok().json(ResponseBody {
+            success: true,
+            info: String::from("orderbook fetched"),
+            body: Some(snapshot),
+        }),
+        Err(MarketServiceError::InvalidDepth) => bad_request("depth must be between 1 and 200"),
+        Err(MarketServiceError::Storage) => {
+            HttpResponse::InternalServerError().json(ResponseBody::<serde_json::Value> {
+                success: false,
+                info: String::from("internal server error"),
+                body: None,
+            })
+        }
+        Err(_) => bad_request("invalid orderbook request"),
     }
 }
 
@@ -87,6 +121,17 @@ mod tests {
         let app = test::init_service(App::new().service(get_market_candles)).await;
         let req = test::TestRequest::get()
             .uri("/1/candles?interval=1m&limit=1001")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn get_orderbook_snapshot_rejects_invalid_depth() {
+        let app = test::init_service(App::new().service(get_orderbook_snapshot)).await;
+        let req = test::TestRequest::get()
+            .uri("/1/orderbook?depth=201")
             .to_request();
         let resp = test::call_service(&app, req).await;
 

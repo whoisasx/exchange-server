@@ -85,6 +85,11 @@ impl ProjectorProcessor {
                     .project_trade_executed(&event, topic, partition, next_offset)
                     .await
             }
+            EngineEvent::OrderBookDelta(event) => {
+                self.repository
+                    .project_orderbook_delta(&event, topic, partition, next_offset)
+                    .await
+            }
         }
     }
 

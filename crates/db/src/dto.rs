@@ -168,3 +168,18 @@ pub struct CandleRow {
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct OrderBookSnapshot {
+    pub market_id: i64,
+    pub engine_sequence: i64,
+    pub engine_timestamp_ms: i64,
+    pub bids: Vec<OrderBookLevelRow>,
+    pub asks: Vec<OrderBookLevelRow>,
+}
+
+#[derive(Debug, sqlx::FromRow, Serialize)]
+pub struct OrderBookLevelRow {
+    pub price: i64,
+    pub quantity: i64,
+}

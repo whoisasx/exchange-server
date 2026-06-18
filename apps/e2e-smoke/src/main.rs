@@ -119,6 +119,14 @@ async fn main() -> Result<()> {
     .await
     .context("alice order failed")?;
 
+    wait_for_message(
+        &alice_ws.messages,
+        "alice market orderbook bid",
+        is_market_orderbook_bid,
+    )
+    .await?;
+    wait_for_orderbook_snapshot(&client, &settings.server_url).await?;
+
     command(
         &client,
         &settings.server_url,
@@ -143,6 +151,12 @@ async fn main() -> Result<()> {
     wait_for_message(&bob_ws.messages, "bob account trade", is_account_trade).await?;
     wait_for_message(&alice_ws.messages, "alice market trade", is_market_trade).await?;
     wait_for_message(&bob_ws.messages, "bob market trade", is_market_trade).await?;
+    wait_for_message(
+        &alice_ws.messages,
+        "alice market orderbook clear",
+        is_market_orderbook_clear,
+    )
+    .await?;
     wait_for_message(
         &alice_ws.messages,
         "alice wallet settlement",
@@ -455,6 +469,38 @@ fn is_market_trade(value: &Value) -> bool {
         && has_engine_sequence(value)
 }
 
+fn is_market_orderbook_bid(value: &Value) -> bool {
+    is_market_orderbook_delta(value)
+        && value
+            .pointer("/payload/event/payload/bids/0/price")
+            .and_then(Value::as_i64)
+            == Some(100)
+        && value
+            .pointer("/payload/event/payload/bids/0/quantity")
+            .and_then(Value::as_i64)
+            == Some(10)
+}
+
+fn is_market_orderbook_clear(value: &Value) -> bool {
+    is_market_orderbook_delta(value)
+        && value
+            .pointer("/payload/event/payload/bids/0/price")
+            .and_then(Value::as_i64)
+            == Some(100)
+        && value
+            .pointer("/payload/event/payload/bids/0/quantity")
+            .and_then(Value::as_i64)
+            == Some(0)
+}
+
+fn is_market_orderbook_delta(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("MarketEvent")
+        && value.pointer("/payload/source").and_then(Value::as_str) == Some("engine")
+        && value.pointer("/payload/market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+        && value.pointer("/payload/event/type").and_then(Value::as_str) == Some("OrderBookDelta")
+        && has_engine_sequence(value)
+}
+
 fn has_engine_sequence(value: &Value) -> bool {
     value
         .pointer("/payload/event/payload/engine_sequence")
@@ -575,6 +621,50 @@ async fn wait_for_candle_api(client: &Client, server_url: &str) -> Result<()> {
 
         sleep(Duration::from_millis(500)).await;
     }
+}
+
+async fn wait_for_orderbook_snapshot(client: &Client, server_url: &str) -> Result<()> {
+    let url = format!("{server_url}/markets/{MARKET_ID}/orderbook?depth=10");
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .context("orderbook api request failed")?;
+
+        if response.status().is_success() {
+            let payload = response
+                .json::<ApiResponse<Value>>()
+                .await
+                .context("orderbook api response was not valid JSON")?;
+            if payload.success
+                && payload
+                    .body
+                    .as_ref()
+                    .is_some_and(is_expected_orderbook_snapshot)
+            {
+                return Ok(());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for orderbook api");
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+fn is_expected_orderbook_snapshot(value: &Value) -> bool {
+    value.get("market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+        && value
+            .get("engine_sequence")
+            .and_then(Value::as_i64)
+            .is_some_and(|sequence| sequence > 0)
+        && value.pointer("/bids/0/price").and_then(Value::as_i64) == Some(100)
+        && value.pointer("/bids/0/quantity").and_then(Value::as_i64) == Some(10)
 }
 
 fn is_expected_candle(value: &Value) -> bool {

@@ -2,8 +2,8 @@ use db::dto::{OrderStatus, OrderType as DbOrderType, SideType};
 use protocol::{
     common::{OrderType, Side},
     engine::{
-        OrderAccepted, OrderCancelled, OrderOpened, OrderRejected, ReservedPlaceOrder,
-        TradeExecuted,
+        OrderAccepted, OrderBookDelta, OrderBookLevel, OrderCancelled, OrderOpened, OrderRejected,
+        ReservedPlaceOrder, TradeExecuted,
     },
 };
 use sqlx::{Pool, Postgres, Row};
@@ -378,6 +378,55 @@ impl ProjectorRepository {
 
         Ok(())
     }
+
+    pub async fn project_orderbook_delta(
+        &self,
+        event: &OrderBookDelta,
+        topic: &str,
+        partition: i32,
+        next_offset: i64,
+    ) -> Result<(), ProjectorRepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query_scalar::<_, i64>(
+            r#"
+            INSERT INTO orderbook_events(
+                market_id,
+                engine_sequence,
+                engine_timestamp_ms,
+                topic,
+                partition,
+                offset_value
+            )
+            VALUES($1,$2,$3,$4,$5,$6)
+            ON CONFLICT(market_id, engine_sequence) DO NOTHING
+            RETURNING engine_sequence
+            "#,
+        )
+        .bind(event.market_id)
+        .bind(event.engine_sequence)
+        .bind(event.engine_timestamp_ms)
+        .bind(topic)
+        .bind(partition)
+        .bind(next_offset - 1)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+
+        if inserted && should_apply_orderbook_delta_in_tx(&mut tx, event).await? {
+            for level in &event.bids {
+                apply_orderbook_level_in_tx(&mut tx, event, "BID", level).await?;
+            }
+            for level in &event.asks {
+                apply_orderbook_level_in_tx(&mut tx, event, "ASK", level).await?;
+            }
+            upsert_orderbook_state_in_tx(&mut tx, event).await?;
+        }
+
+        save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
+        tx.commit().await?;
+
+        Ok(())
+    }
 }
 
 async fn save_queue_offset_in_tx(
@@ -399,6 +448,109 @@ async fn save_queue_offset_in_tx(
     .bind(topic)
     .bind(partition)
     .bind(next_offset)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn should_apply_orderbook_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    event: &OrderBookDelta,
+) -> Result<bool, ProjectorRepositoryError> {
+    let current_sequence = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT engine_sequence
+        FROM orderbook_state
+        WHERE market_id=$1
+        "#,
+    )
+    .bind(event.market_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(current_sequence
+        .map(|sequence| event.engine_sequence > sequence)
+        .unwrap_or(true))
+}
+
+async fn upsert_orderbook_state_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    event: &OrderBookDelta,
+) -> Result<(), ProjectorRepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO orderbook_state(
+            market_id,
+            engine_sequence,
+            engine_timestamp_ms
+        )
+        VALUES($1,$2,$3)
+        ON CONFLICT(market_id)
+        DO UPDATE
+        SET engine_sequence=EXCLUDED.engine_sequence,
+            engine_timestamp_ms=EXCLUDED.engine_timestamp_ms,
+            updated_at=NOW()
+        WHERE orderbook_state.engine_sequence < EXCLUDED.engine_sequence
+        "#,
+    )
+    .bind(event.market_id)
+    .bind(event.engine_sequence)
+    .bind(event.engine_timestamp_ms)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn apply_orderbook_level_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    event: &OrderBookDelta,
+    side: &str,
+    level: &OrderBookLevel,
+) -> Result<(), ProjectorRepositoryError> {
+    if level.quantity <= 0 {
+        sqlx::query(
+            r#"
+            DELETE FROM orderbook_levels
+            WHERE market_id=$1
+              AND side=$2
+              AND price=$3
+              AND last_engine_sequence < $4
+            "#,
+        )
+        .bind(event.market_id)
+        .bind(side)
+        .bind(level.price)
+        .bind(event.engine_sequence)
+        .execute(&mut **tx)
+        .await?;
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO orderbook_levels(
+            market_id,
+            side,
+            price,
+            quantity,
+            last_engine_sequence
+        )
+        VALUES($1,$2,$3,$4,$5)
+        ON CONFLICT(market_id, side, price)
+        DO UPDATE
+        SET quantity=EXCLUDED.quantity,
+            last_engine_sequence=EXCLUDED.last_engine_sequence,
+            updated_at=NOW()
+        WHERE orderbook_levels.last_engine_sequence < EXCLUDED.last_engine_sequence
+        "#,
+    )
+    .bind(event.market_id)
+    .bind(side)
+    .bind(level.price)
+    .bind(level.quantity)
+    .bind(event.engine_sequence)
     .execute(&mut **tx)
     .await?;
 

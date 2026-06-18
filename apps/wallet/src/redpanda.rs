@@ -516,6 +516,7 @@ fn engine_command_key(command: &EngineCommand) -> String {
 fn wallet_commands_from_engine_event(event: EngineEvent) -> Vec<WalletCommand> {
     match event {
         EngineEvent::OrderOpened(_) => Vec::new(),
+        EngineEvent::OrderBookDelta(_) => Vec::new(),
         EngineEvent::OrderCancelled(event) => {
             vec![WalletCommand::ReleaseReservation(ReleaseReservation {
                 reservation_id: event.reservation_id,

@@ -74,6 +74,7 @@ pub enum EngineEvent {
     OrderOpened(OrderOpened),
     OrderCancelled(OrderCancelled),
     TradeExecuted(TradeExecuted),
+    OrderBookDelta(OrderBookDelta),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +123,21 @@ pub struct TradeSettlement {
     pub debit_amount: i64,
     pub credit_asset: Asset,
     pub credit_amount: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderBookDelta {
+    pub engine_sequence: i64,
+    pub engine_timestamp_ms: i64,
+    pub market_id: i64,
+    pub bids: Vec<OrderBookLevel>,
+    pub asks: Vec<OrderBookLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderBookLevel {
+    pub price: i64,
+    pub quantity: i64,
 }
 
 #[cfg(test)]
@@ -195,6 +211,9 @@ mod tests {
         ));
         assert_event_fixture(include_str!(
             "../../../docs/streams/examples/engine-trade-executed.event.json"
+        ));
+        assert_event_fixture(include_str!(
+            "../../../docs/streams/examples/engine-orderbook-delta.event.json"
         ));
     }
 

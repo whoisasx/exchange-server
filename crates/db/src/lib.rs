@@ -5,6 +5,7 @@ pub mod collaterals;
 pub mod dto;
 pub mod fills;
 pub mod markets;
+pub mod orderbook;
 pub mod orders;
 pub mod pool;
 pub mod position_fills;

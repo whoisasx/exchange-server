@@ -66,6 +66,14 @@ Market updates are sent only after subscribing to a market:
 }
 ```
 
-The service starts from latest Redpanda offsets. Clients should fetch initial state from REST endpoints before opening a socket.
+The service starts from latest Redpanda offsets. For state that needs gap-free live stitching, clients should subscribe before fetching the REST snapshot.
 
 Engine event payloads are forwarded unchanged, including `engine_sequence` and `engine_timestamp_ms`. Clients that combine snapshots with live market updates should use the engine sequence from the payload for ordering, not websocket receive time.
+
+For orderbook state:
+
+1. Open websocket and subscribe to the market.
+2. Buffer `OrderBookDelta` market events.
+3. Fetch `GET /api/markets/{market_id}/orderbook?depth=50`.
+4. Drop buffered deltas with `engine_sequence <= snapshot.engine_sequence`.
+5. Apply remaining and future deltas in sequence order.

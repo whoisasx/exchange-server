@@ -94,6 +94,10 @@ impl EventRouter {
                     .await?;
                 }
             }
+            EngineEvent::OrderBookDelta(delta) => {
+                self.send_market(delta.market_id, EventSource::Engine, event_value, metadata)
+                    .await?;
+            }
         }
 
         Ok(())

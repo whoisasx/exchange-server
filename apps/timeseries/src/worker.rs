@@ -70,7 +70,9 @@ impl TimeseriesWorker {
                     .await
                     .map_err(timeseries_repository_error)?;
             }
-            EngineEvent::OrderOpened(_) | EngineEvent::OrderCancelled(_) => {
+            EngineEvent::OrderOpened(_)
+            | EngineEvent::OrderCancelled(_)
+            | EngineEvent::OrderBookDelta(_) => {
                 self.save_queue_offset(topic, partition, next_offset)
                     .await?;
             }
