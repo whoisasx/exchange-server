@@ -1,4 +1,5 @@
-use db::dto::{OrderStatus, OrderType as DbOrderType, SideType};
+use chrono::{DateTime, Utc};
+use db::dto::{CloseType, MarginType, OrderStatus, OrderType as DbOrderType, SideType};
 use protocol::{
     common::{OrderType, Side},
     engine::{
@@ -42,6 +43,17 @@ struct StoredOrderContext {
     quantity: i64,
     price: i64,
     margin: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredPosition {
+    position_id: i64,
+    side: SideType,
+    quantity: i64,
+    initial_margin: i64,
+    average_price: i64,
+    opened_at: DateTime<Utc>,
+    open_order_id: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -324,7 +336,7 @@ impl ProjectorRepository {
         )
         .await?;
 
-        sqlx::query(
+        let inserted_fill = sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO fills(
                 fill_id,
@@ -342,6 +354,7 @@ impl ProjectorRepository {
             )
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TO_TIMESTAMP($12::DOUBLE PRECISION / 1000.0))
             ON CONFLICT(fill_id) DO NOTHING
+            RETURNING fill_id
             "#,
         )
         .bind(event.fill_id)
@@ -356,8 +369,9 @@ impl ProjectorRepository {
         .bind(maker.side)
         .bind(taker.side)
         .bind(event.engine_timestamp_ms)
-        .execute(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
 
         sqlx::query(
             r#"
@@ -373,6 +387,28 @@ impl ProjectorRepository {
 
         update_order_after_fill_in_tx(&mut tx, &maker, event.maker_order_id).await?;
         update_order_after_fill_in_tx(&mut tx, &taker, event.taker_order_id).await?;
+        if inserted_fill {
+            project_position_for_fill_in_tx(
+                &mut tx,
+                &maker,
+                event.maker_order_id,
+                event.fill_id,
+                event.price,
+                event.quantity,
+                event.engine_timestamp_ms,
+            )
+            .await?;
+            project_position_for_fill_in_tx(
+                &mut tx,
+                &taker,
+                event.taker_order_id,
+                event.fill_id,
+                event.price,
+                event.quantity,
+                event.engine_timestamp_ms,
+            )
+            .await?;
+        }
         save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
         tx.commit().await?;
 
@@ -555,6 +591,408 @@ async fn apply_orderbook_level_in_tx(
     .await?;
 
     Ok(())
+}
+
+async fn project_position_for_fill_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    context: &StoredOrderContext,
+    order_id: i64,
+    fill_id: i64,
+    price: i64,
+    quantity: i64,
+    engine_timestamp_ms: i64,
+) -> Result<(), ProjectorRepositoryError> {
+    let position = load_position_for_update_in_tx(tx, context.user_id, context.market_id).await?;
+
+    match position {
+        None => {
+            let initial_margin = proportional_margin(context.margin, context.quantity, quantity);
+            insert_open_position_in_tx(
+                tx,
+                context,
+                order_id,
+                fill_id,
+                quantity,
+                price,
+                initial_margin,
+                engine_timestamp_ms,
+            )
+            .await
+        }
+        Some(position) if position.side == context.side => {
+            let added_margin = proportional_margin(context.margin, context.quantity, quantity);
+            increase_position_in_tx(tx, &position, fill_id, quantity, price, added_margin).await
+        }
+        Some(position) => {
+            reduce_or_reverse_position_in_tx(
+                tx,
+                &position,
+                context,
+                order_id,
+                fill_id,
+                price,
+                quantity,
+                engine_timestamp_ms,
+            )
+            .await
+        }
+    }
+}
+
+async fn load_position_for_update_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    user_id: i64,
+    market_id: i64,
+) -> Result<Option<StoredPosition>, ProjectorRepositoryError> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            position_id,
+            side,
+            quantity,
+            initial_margin,
+            average_price,
+            opened_at,
+            open_order_id
+        FROM positions
+        WHERE user_id=$1 AND market_id=$2
+        FOR UPDATE
+        "#,
+    )
+    .bind(user_id)
+    .bind(market_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(row.map(|row| StoredPosition {
+        position_id: row.get("position_id"),
+        side: row.get("side"),
+        quantity: row.get("quantity"),
+        initial_margin: row.get("initial_margin"),
+        average_price: row.get("average_price"),
+        opened_at: row.get("opened_at"),
+        open_order_id: row.get("open_order_id"),
+    }))
+}
+
+async fn insert_open_position_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    context: &StoredOrderContext,
+    order_id: i64,
+    fill_id: i64,
+    quantity: i64,
+    price: i64,
+    initial_margin: i64,
+    engine_timestamp_ms: i64,
+) -> Result<(), ProjectorRepositoryError> {
+    let position_id = next_projector_position_id_in_tx(tx).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO positions(
+            position_id,
+            user_id,
+            market_id,
+            market_name,
+            side,
+            quantity,
+            unrealized_pnl,
+            initial_margin,
+            maintenance_margin,
+            margin_chosen,
+            liquidation_price,
+            average_price,
+            opened_at,
+            updated_at,
+            open_order_id
+        )
+        VALUES(
+            $1,$2,$3,$4,$5,$6,0,$7,0,$8,0,$9,
+            TO_TIMESTAMP($10::DOUBLE PRECISION / 1000.0),
+            TO_TIMESTAMP($10::DOUBLE PRECISION / 1000.0),
+            $11
+        )
+        "#,
+    )
+    .bind(position_id)
+    .bind(context.user_id)
+    .bind(context.market_id)
+    .bind(&context.market_name)
+    .bind(context.side)
+    .bind(quantity)
+    .bind(initial_margin)
+    .bind(MarginType::ISOLATED)
+    .bind(price)
+    .bind(engine_timestamp_ms)
+    .bind(order_id)
+    .execute(&mut **tx)
+    .await?;
+
+    link_fill_to_open_position_in_tx(tx, position_id, fill_id).await
+}
+
+async fn increase_position_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    position: &StoredPosition,
+    fill_id: i64,
+    quantity: i64,
+    price: i64,
+    added_margin: i64,
+) -> Result<(), ProjectorRepositoryError> {
+    let next_quantity = position.quantity + quantity;
+    let next_average_price =
+        weighted_average_price(position.average_price, position.quantity, price, quantity);
+
+    sqlx::query(
+        r#"
+        UPDATE positions
+        SET quantity=$2,
+            initial_margin=$3,
+            average_price=$4,
+            updated_at=NOW()
+        WHERE position_id=$1
+        "#,
+    )
+    .bind(position.position_id)
+    .bind(next_quantity)
+    .bind(position.initial_margin + added_margin)
+    .bind(next_average_price)
+    .execute(&mut **tx)
+    .await?;
+
+    link_fill_to_open_position_in_tx(tx, position.position_id, fill_id).await
+}
+
+async fn reduce_or_reverse_position_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    position: &StoredPosition,
+    context: &StoredOrderContext,
+    order_id: i64,
+    fill_id: i64,
+    price: i64,
+    quantity: i64,
+    engine_timestamp_ms: i64,
+) -> Result<(), ProjectorRepositoryError> {
+    let closed_quantity = position.quantity.min(quantity);
+    let closed_margin =
+        proportional_margin(position.initial_margin, position.quantity, closed_quantity);
+
+    let closed_position_id = insert_closed_position_in_tx(
+        tx,
+        position,
+        context,
+        order_id,
+        fill_id,
+        closed_quantity,
+        price,
+        closed_margin,
+        engine_timestamp_ms,
+    )
+    .await?;
+
+    if closed_quantity < position.quantity {
+        let remaining_quantity = position.quantity - closed_quantity;
+        let remaining_margin = (position.initial_margin - closed_margin).max(0);
+
+        sqlx::query(
+            r#"
+            UPDATE positions
+            SET quantity=$2,
+                initial_margin=$3,
+                updated_at=TO_TIMESTAMP($4::DOUBLE PRECISION / 1000.0)
+            WHERE position_id=$1
+            "#,
+        )
+        .bind(position.position_id)
+        .bind(remaining_quantity)
+        .bind(remaining_margin)
+        .bind(engine_timestamp_ms)
+        .execute(&mut **tx)
+        .await?;
+
+        return Ok(());
+    }
+
+    transfer_open_position_fills_to_closed_in_tx(tx, position.position_id, closed_position_id)
+        .await?;
+    delete_open_position_in_tx(tx, position.position_id).await?;
+
+    let reversal_quantity = quantity - closed_quantity;
+    if reversal_quantity > 0 {
+        let reversal_margin =
+            proportional_margin(context.margin, context.quantity, reversal_quantity);
+        insert_open_position_in_tx(
+            tx,
+            context,
+            order_id,
+            fill_id,
+            reversal_quantity,
+            price,
+            reversal_margin,
+            engine_timestamp_ms,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn insert_closed_position_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    position: &StoredPosition,
+    context: &StoredOrderContext,
+    close_order_id: i64,
+    fill_id: i64,
+    quantity: i64,
+    exit_price: i64,
+    initial_margin: i64,
+    engine_timestamp_ms: i64,
+) -> Result<i64, ProjectorRepositoryError> {
+    let closed_position_id = next_projector_position_id_in_tx(tx).await?;
+    let open_order_id = position.open_order_id.unwrap_or(close_order_id);
+    let realized_pnl = realized_pnl(position.side, position.average_price, exit_price, quantity);
+
+    sqlx::query(
+        r#"
+        INSERT INTO closed_positions(
+            position_id,
+            user_id,
+            market_id,
+            market_name,
+            side,
+            quantity,
+            entry_price,
+            exit_price,
+            realized_pnl,
+            initial_margin,
+            closing_fee,
+            opened_at,
+            closed_at,
+            open_order_id,
+            close_order_id,
+            close_reason
+        )
+        VALUES(
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,$11,
+            TO_TIMESTAMP($12::DOUBLE PRECISION / 1000.0),
+            $13,$14,$15
+        )
+        "#,
+    )
+    .bind(closed_position_id)
+    .bind(context.user_id)
+    .bind(context.market_id)
+    .bind(&context.market_name)
+    .bind(position.side)
+    .bind(quantity)
+    .bind(position.average_price)
+    .bind(exit_price)
+    .bind(realized_pnl)
+    .bind(initial_margin)
+    .bind(position.opened_at)
+    .bind(engine_timestamp_ms)
+    .bind(open_order_id)
+    .bind(close_order_id)
+    .bind(CloseType::TRADE)
+    .execute(&mut **tx)
+    .await?;
+
+    link_fill_to_closed_position_in_tx(tx, closed_position_id, fill_id).await?;
+
+    Ok(closed_position_id)
+}
+
+async fn transfer_open_position_fills_to_closed_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    open_position_id: i64,
+    closed_position_id: i64,
+) -> Result<(), ProjectorRepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO closed_position_fills(position_id, fill_id)
+        SELECT $1, fill_id
+        FROM position_fills
+        WHERE position_id=$2
+        ON CONFLICT(position_id, fill_id) DO NOTHING
+        "#,
+    )
+    .bind(closed_position_id)
+    .bind(open_position_id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn delete_open_position_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    position_id: i64,
+) -> Result<(), ProjectorRepositoryError> {
+    sqlx::query(
+        r#"
+        DELETE FROM positions
+        WHERE position_id=$1
+        "#,
+    )
+    .bind(position_id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn link_fill_to_open_position_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    position_id: i64,
+    fill_id: i64,
+) -> Result<(), ProjectorRepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO position_fills(position_id, fill_id)
+        VALUES($1,$2)
+        ON CONFLICT(position_id, fill_id) DO NOTHING
+        "#,
+    )
+    .bind(position_id)
+    .bind(fill_id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn link_fill_to_closed_position_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    position_id: i64,
+    fill_id: i64,
+) -> Result<(), ProjectorRepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO closed_position_fills(position_id, fill_id)
+        VALUES($1,$2)
+        ON CONFLICT(position_id, fill_id) DO NOTHING
+        "#,
+    )
+    .bind(position_id)
+    .bind(fill_id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn next_projector_position_id_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+) -> Result<i64, ProjectorRepositoryError> {
+    let position_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT nextval('projector_position_id_seq')::BIGINT
+        "#,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(position_id)
 }
 
 async fn load_context_for_order_in_tx(
@@ -936,6 +1374,47 @@ fn context_status_for_order_status(status: OrderStatus) -> &'static str {
     }
 }
 
+fn proportional_margin(source_margin: i64, source_quantity: i64, target_quantity: i64) -> i64 {
+    if source_margin <= 0 || source_quantity <= 0 || target_quantity <= 0 {
+        return 0;
+    }
+    if target_quantity >= source_quantity {
+        return source_margin;
+    }
+
+    let margin = (source_margin as i128 * target_quantity as i128) / source_quantity as i128;
+    clamp_i128_to_i64(margin).clamp(1, source_margin)
+}
+
+fn weighted_average_price(
+    current_average: i64,
+    current_quantity: i64,
+    fill_price: i64,
+    fill_quantity: i64,
+) -> i64 {
+    let next_quantity = current_quantity + fill_quantity;
+    if next_quantity <= 0 {
+        return fill_price;
+    }
+
+    let notional = current_average as i128 * current_quantity as i128
+        + fill_price as i128 * fill_quantity as i128;
+    clamp_i128_to_i64(notional / next_quantity as i128)
+}
+
+fn realized_pnl(side: SideType, entry_price: i64, exit_price: i64, quantity: i64) -> i64 {
+    let price_delta = match side {
+        SideType::LONG => exit_price as i128 - entry_price as i128,
+        SideType::SHORT => entry_price as i128 - exit_price as i128,
+    };
+
+    clamp_i128_to_i64(price_delta * quantity as i128)
+}
+
+fn clamp_i128_to_i64(value: i128) -> i64 {
+    value.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,5 +1440,26 @@ mod tests {
     fn protocol_order_type_mapping_matches_db_names() {
         assert_eq!(order_type_to_db(OrderType::LIMIT), DbOrderType::LIMIT);
         assert_eq!(order_type_to_db(OrderType::MARKET), DbOrderType::MARKET);
+    }
+
+    #[test]
+    fn proportional_margin_slices_source_margin() {
+        assert_eq!(proportional_margin(1000, 10, 4), 400);
+        assert_eq!(proportional_margin(1000, 10, 10), 1000);
+        assert_eq!(proportional_margin(0, 10, 4), 0);
+    }
+
+    #[test]
+    fn weighted_average_price_uses_position_notional() {
+        assert_eq!(weighted_average_price(100, 10, 120, 10), 110);
+        assert_eq!(weighted_average_price(100, 3, 101, 1), 100);
+    }
+
+    #[test]
+    fn realized_pnl_uses_position_side() {
+        assert_eq!(realized_pnl(SideType::LONG, 100, 120, 10), 200);
+        assert_eq!(realized_pnl(SideType::LONG, 100, 90, 10), -100);
+        assert_eq!(realized_pnl(SideType::SHORT, 100, 80, 10), 200);
+        assert_eq!(realized_pnl(SideType::SHORT, 100, 110, 10), -100);
     }
 }

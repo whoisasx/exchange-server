@@ -36,6 +36,6 @@ Smoke path:
 2. Place a limit order for user A.
 3. Place an opposite-side limit order for user B on the same market and crossing price.
 4. Connect to `GET /ws?token=<jwt>` for each user and subscribe to the traded market.
-5. Confirm the server receives engine replies, wallet receives settlement events, projector writes the order/fill/orderbook read models, timeseries writes candles, ledger writes audit entries, and websocket clients receive account plus market updates.
+5. Confirm the server receives engine replies, wallet receives settlement events, projector writes the order/fill/position/orderbook read models, timeseries writes candles, ledger writes audit entries, and websocket clients receive account plus market updates.
 
 The fake engine is intentionally not a production matching engine. It exists only to validate stream wiring and consumer behavior.
