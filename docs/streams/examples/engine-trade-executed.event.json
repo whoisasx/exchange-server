@@ -13,6 +13,7 @@
     "taker_user_id": 43,
     "maker_reservation_id": "res_maker_001",
     "taker_reservation_id": "res_taker_001",
+    "execution_reason": "TRADE",
     "settlements": [
       {
         "reservation_id": "res_taker_001",

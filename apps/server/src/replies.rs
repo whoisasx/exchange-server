@@ -188,6 +188,8 @@ fn engine_reply_request_id(reply: &EngineReply) -> &str {
         EngineReply::OrderRejected(reply) => &reply.request_id,
         EngineReply::CancelAccepted(reply) => &reply.request_id,
         EngineReply::CancelRejected(reply) => &reply.request_id,
+        EngineReply::LiquidationAccepted(reply) => &reply.request_id,
+        EngineReply::LiquidationRejected(reply) => &reply.request_id,
     }
 }
 

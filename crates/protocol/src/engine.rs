@@ -11,6 +11,7 @@ pub const ENGINE_EVENTS_TOPIC: &str = "engine.events";
 pub enum EngineCommand {
     PlaceOrder(ReservedPlaceOrder),
     CancelOrder(CancelOrder),
+    LiquidatePosition(LiquidatePosition),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,12 +35,26 @@ pub struct CancelOrder {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiquidatePosition {
+    pub envelope: CommandEnvelope,
+    pub liquidation_id: String,
+    pub market_id: i64,
+    pub market_name: String,
+    pub liquidated_user_id: i64,
+    pub position_side: Side,
+    pub quantity: i64,
+    pub price: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum EngineReply {
     OrderAccepted(OrderAccepted),
     OrderRejected(OrderRejected),
     CancelAccepted(CancelAccepted),
     CancelRejected(CancelRejected),
+    LiquidationAccepted(LiquidationAccepted),
+    LiquidationRejected(LiquidationRejected),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +82,32 @@ pub struct CancelRejected {
     pub request_id: String,
     pub order_id: i64,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiquidationAccepted {
+    pub request_id: String,
+    pub liquidation_id: String,
+    pub order_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiquidationRejected {
+    pub request_id: String,
+    pub liquidation_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionReason {
+    #[serde(rename = "TRADE")]
+    TRADE,
+    #[serde(rename = "LIQUIDATION")]
+    LIQUIDATION,
+}
+
+fn default_execution_reason() -> ExecutionReason {
+    ExecutionReason::TRADE
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +154,8 @@ pub struct TradeExecuted {
     pub taker_user_id: i64,
     pub maker_reservation_id: Option<String>,
     pub taker_reservation_id: Option<String>,
+    #[serde(default = "default_execution_reason")]
+    pub execution_reason: ExecutionReason,
     #[serde(default)]
     pub settlements: Vec<TradeSettlement>,
 }
@@ -171,7 +214,10 @@ mod tests {
         .expect("legacy trade event should deserialize");
 
         match event {
-            EngineEvent::TradeExecuted(trade) => assert!(trade.settlements.is_empty()),
+            EngineEvent::TradeExecuted(trade) => {
+                assert_eq!(trade.execution_reason, ExecutionReason::TRADE);
+                assert!(trade.settlements.is_empty());
+            }
             other => panic!("unexpected event: {other:?}"),
         }
     }
@@ -186,6 +232,9 @@ mod tests {
         ));
         assert_command_fixture(include_str!(
             "../../../docs/streams/examples/engine-cancel-order.command.json"
+        ));
+        assert_command_fixture(include_str!(
+            "../../../docs/streams/examples/engine-liquidate-position.command.json"
         ));
     }
 
@@ -203,6 +252,12 @@ mod tests {
         assert_reply_fixture(include_str!(
             "../../../docs/streams/examples/engine-cancel-rejected.reply.json"
         ));
+        assert_reply_fixture(include_str!(
+            "../../../docs/streams/examples/engine-liquidation-accepted.reply.json"
+        ));
+        assert_reply_fixture(include_str!(
+            "../../../docs/streams/examples/engine-liquidation-rejected.reply.json"
+        ));
     }
 
     #[test]
@@ -215,6 +270,9 @@ mod tests {
         ));
         assert_event_fixture(include_str!(
             "../../../docs/streams/examples/engine-trade-executed.event.json"
+        ));
+        assert_event_fixture(include_str!(
+            "../../../docs/streams/examples/engine-trade-executed-liquidation.event.json"
         ));
         assert_event_fixture(include_str!(
             "../../../docs/streams/examples/engine-orderbook-delta.event.json"

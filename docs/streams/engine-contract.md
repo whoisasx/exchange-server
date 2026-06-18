@@ -45,6 +45,7 @@ Enums are serialized as exact uppercase strings:
 Asset: USDC, USDT, SOL, ETH, BTC, PERP, HYP
 Side: LONG, SHORT
 OrderType: LIMIT, MARKET
+ExecutionReason: TRADE, LIQUIDATION
 ```
 
 All IDs, sequence, timestamp, price, quantity, amount, and margin fields are integer values compatible with signed 64-bit integers.
@@ -110,6 +111,23 @@ Required engine behavior:
 - Publish exactly one `CancelAccepted` or `CancelRejected` reply for the command.
 - If cancellation releases reserved funds, publish `OrderCancelled`.
 
+### LiquidatePosition
+
+Topic: `engine.commands`
+
+Record key: `market_id`
+
+Fixture: `docs/streams/examples/engine-liquidate-position.command.json`
+
+Required engine behavior:
+
+- Treat liquidation eligibility as engine-owned state. Rust read models may show indicative risk, but they are not authoritative.
+- Validate current mark/index price, account exposure, margin state, and available execution path at command time.
+- Publish exactly one `LiquidationAccepted` or `LiquidationRejected` reply for the command.
+- If accepted and executed, emit `TradeExecuted` with `execution_reason="LIQUIDATION"`.
+- The liquidation order must be reduce-only for the liquidated account and must not increase or reverse exposure.
+- If the liquidated side is represented as a synthetic taker order, set `taker_reservation_id` to `liquidation_id` so consumers can resolve command context.
+
 ## Replies
 
 Replies go to `engine.replies` and must be produced to the original command envelope's `reply_partition`.
@@ -120,6 +138,8 @@ Replies go to `engine.replies` and must be produced to the original command enve
 | `OrderRejected` | `docs/streams/examples/engine-order-rejected.reply.json` |
 | `CancelAccepted` | `docs/streams/examples/engine-cancel-accepted.reply.json` |
 | `CancelRejected` | `docs/streams/examples/engine-cancel-rejected.reply.json` |
+| `LiquidationAccepted` | `docs/streams/examples/engine-liquidation-accepted.reply.json` |
+| `LiquidationRejected` | `docs/streams/examples/engine-liquidation-rejected.reply.json` |
 
 Reply variants:
 
@@ -128,6 +148,8 @@ OrderAccepted: request_id, order_id, reservation_id
 OrderRejected: request_id, reservation_id, reason
 CancelAccepted: request_id, order_id
 CancelRejected: request_id, order_id, reason
+LiquidationAccepted: request_id, liquidation_id, order_id
+LiquidationRejected: request_id, liquidation_id, reason
 ```
 
 `OrderRejected.reservation_id` may be `null` if no reservation should be released by downstream consumers.
@@ -157,7 +179,7 @@ Event routing fields:
 ```text
 OrderOpened: engine_sequence, engine_timestamp_ms, order_id, reservation_id, user_id, market_id
 OrderCancelled: engine_sequence, engine_timestamp_ms, order_id, reservation_id, user_id, market_id, released_amount
-TradeExecuted: engine_sequence, engine_timestamp_ms, fill_id, market_id, price, quantity, maker_order_id, taker_order_id, maker_user_id, taker_user_id, maker_reservation_id, taker_reservation_id, settlements
+TradeExecuted: engine_sequence, engine_timestamp_ms, fill_id, market_id, price, quantity, maker_order_id, taker_order_id, maker_user_id, taker_user_id, maker_reservation_id, taker_reservation_id, execution_reason, settlements
 OrderBookDelta: engine_sequence, engine_timestamp_ms, market_id, bids, asks
 ```
 
@@ -171,7 +193,9 @@ Event consumers use these events as follows:
 - Timeseries consumes `TradeExecuted` to build market candles from engine timestamps.
 - Projector consumes `OrderBookDelta` to maintain REST orderbook snapshots.
 
-`TradeExecuted.settlements` is the wallet-facing settlement instruction. Each settlement becomes a wallet `SettleTrade` command.
+`TradeExecuted.execution_reason` is `TRADE` for normal execution and `LIQUIDATION` for engine-authorized liquidation execution. Projector uses this field only to choose the closed-position reason; it does not decide liquidation.
+
+`TradeExecuted.settlements` is the wallet-facing settlement instruction. Each settlement becomes a wallet `SettleTrade` command. Liquidation trades may omit settlements for synthetic liquidation order IDs unless those IDs correspond to wallet reservations.
 
 `OrderBookDelta` is price-level based. `bids` are LONG-side levels, `asks` are SHORT-side levels, and `quantity=0` means delete that price level.
 

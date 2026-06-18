@@ -1,0 +1,27 @@
+{
+  "type": "TradeExecuted",
+  "payload": {
+    "engine_sequence": 4,
+    "engine_timestamp_ms": 1710000003000,
+    "fill_id": 7002,
+    "market_id": 1,
+    "price": 95,
+    "quantity": 10,
+    "maker_order_id": 9001,
+    "taker_order_id": 9003,
+    "maker_user_id": 43,
+    "taker_user_id": 42,
+    "maker_reservation_id": "res_maker_002",
+    "taker_reservation_id": "liq_001",
+    "execution_reason": "LIQUIDATION",
+    "settlements": [
+      {
+        "reservation_id": "res_maker_002",
+        "debit_asset": "USDC",
+        "debit_amount": 950,
+        "credit_asset": "SOL",
+        "credit_amount": 10
+      }
+    ]
+  }
+}

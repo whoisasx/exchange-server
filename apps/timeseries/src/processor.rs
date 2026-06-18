@@ -76,7 +76,7 @@ pub fn bucket_start_ms(timestamp_ms: i64, interval_ms: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use protocol::engine::TradeExecuted;
+    use protocol::engine::{ExecutionReason, TradeExecuted};
 
     use super::*;
 
@@ -102,6 +102,7 @@ mod tests {
             taker_user_id: 43,
             maker_reservation_id: None,
             taker_reservation_id: None,
+            execution_reason: ExecutionReason::TRADE,
             settlements: Vec::new(),
         };
 

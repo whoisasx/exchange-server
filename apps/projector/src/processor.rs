@@ -28,6 +28,11 @@ impl ProjectorProcessor {
                     .save_order_context(&order, topic, partition, next_offset)
                     .await
             }
+            EngineCommand::LiquidatePosition(liquidation) => {
+                self.repository
+                    .save_liquidation_context(&liquidation, topic, partition, next_offset)
+                    .await
+            }
             EngineCommand::CancelOrder(_) => {
                 self.repository
                     .save_queue_offset(topic, partition, next_offset)
@@ -52,6 +57,16 @@ impl ProjectorProcessor {
             EngineReply::OrderRejected(reply) => {
                 self.repository
                     .mark_order_rejected(&reply, topic, partition, next_offset)
+                    .await
+            }
+            EngineReply::LiquidationAccepted(reply) => {
+                self.repository
+                    .mark_liquidation_accepted(&reply, topic, partition, next_offset)
+                    .await
+            }
+            EngineReply::LiquidationRejected(reply) => {
+                self.repository
+                    .mark_liquidation_rejected(&reply, topic, partition, next_offset)
                     .await
             }
             EngineReply::CancelAccepted(_) | EngineReply::CancelRejected(_) => {

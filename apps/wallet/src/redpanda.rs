@@ -510,6 +510,7 @@ fn engine_command_key(command: &EngineCommand) -> String {
     match command {
         EngineCommand::PlaceOrder(command) => command.market_id.to_string(),
         EngineCommand::CancelOrder(command) => command.market_id.to_string(),
+        EngineCommand::LiquidatePosition(command) => command.market_id.to_string(),
     }
 }
 
@@ -567,7 +568,7 @@ impl From<crate::worker::WalletError> for QueueError {
 mod tests {
     use protocol::{
         common::{Asset, CommandEnvelope, OrderType, Side},
-        engine::{OrderCancelled, TradeExecuted, TradeSettlement},
+        engine::{ExecutionReason, OrderCancelled, TradeExecuted, TradeSettlement},
         wallet::{Deposit, PlaceOrderIntent, ReleaseReservation, SettleTrade},
     };
 
@@ -684,6 +685,7 @@ mod tests {
                 taker_user_id: 43,
                 maker_reservation_id: Some(String::from("res-maker")),
                 taker_reservation_id: Some(String::from("res-taker")),
+                execution_reason: ExecutionReason::TRADE,
                 settlements: vec![TradeSettlement {
                     reservation_id: String::from("res-maker"),
                     debit_asset: Asset::USDC,

@@ -7,9 +7,10 @@ use std::{
 use protocol::{
     common::{Asset, Side},
     engine::{
-        CancelAccepted, CancelRejected, EngineCommand, EngineEvent, EngineReply, OrderAccepted,
-        OrderBookDelta, OrderBookLevel, OrderCancelled, OrderOpened, OrderRejected,
-        ReservedPlaceOrder, TradeExecuted, TradeSettlement,
+        CancelAccepted, CancelRejected, EngineCommand, EngineEvent, EngineReply, ExecutionReason,
+        LiquidatePosition, LiquidationAccepted, LiquidationRejected, OrderAccepted, OrderBookDelta,
+        OrderBookLevel, OrderCancelled, OrderOpened, OrderRejected, ReservedPlaceOrder,
+        TradeExecuted, TradeSettlement,
     },
     wallet::{WalletEvent, WalletFundsReserved},
 };
@@ -61,6 +62,9 @@ impl FakeEngine {
     pub fn process_command(&self, command: EngineCommand) -> FakeEngineOutput {
         match command {
             EngineCommand::PlaceOrder(order) => self.process_place_order(order),
+            EngineCommand::LiquidatePosition(liquidation) => {
+                self.process_liquidate_position(liquidation)
+            }
             EngineCommand::CancelOrder(cancel) => {
                 let mut state = self.state.lock().expect("fake engine state poisoned");
 
@@ -160,7 +164,7 @@ impl FakeEngine {
             let maker_market_id = maker.market_id;
             let maker_side = maker.side;
             let maker_price = maker.price;
-            let fill = state.execute_fill(&mut maker, &mut incoming);
+            let fill = state.execute_fill(&mut maker, &mut incoming, ExecutionReason::TRADE);
 
             output.events.push(EventPublication {
                 key: fill.market_id.to_string(),
@@ -211,6 +215,76 @@ impl FakeEngine {
                     incoming_market_id,
                     incoming_side,
                     incoming_price,
+                    level_quantity,
+                ),
+            });
+        }
+
+        output
+    }
+
+    fn process_liquidate_position(&self, liquidation: LiquidatePosition) -> FakeEngineOutput {
+        if liquidation.quantity <= 0
+            || liquidation.price < 0
+            || liquidation.market_id <= 0
+            || liquidation.liquidated_user_id <= 0
+        {
+            return FakeEngineOutput {
+                replies: vec![ReplyPublication {
+                    partition: liquidation.envelope.reply_partition,
+                    key: liquidation.envelope.request_id.clone(),
+                    reply: EngineReply::LiquidationRejected(LiquidationRejected {
+                        request_id: liquidation.envelope.request_id,
+                        liquidation_id: liquidation.liquidation_id,
+                        reason: String::from("invalid liquidation command"),
+                    }),
+                }],
+                events: Vec::new(),
+            };
+        }
+
+        let mut state = self.state.lock().expect("fake engine state poisoned");
+        let order_id = state.next_order_id();
+        let mut incoming = state.liquidation_order_from_command(order_id, &liquidation);
+        let mut output = FakeEngineOutput {
+            replies: vec![ReplyPublication {
+                partition: liquidation.envelope.reply_partition,
+                key: liquidation.envelope.request_id.clone(),
+                reply: EngineReply::LiquidationAccepted(LiquidationAccepted {
+                    request_id: liquidation.envelope.request_id,
+                    liquidation_id: liquidation.liquidation_id.clone(),
+                    order_id,
+                }),
+            }],
+            events: Vec::new(),
+        };
+
+        if let Some(maker_order_id) = state.matching_order_id(&incoming) {
+            let mut maker = state
+                .resting_orders
+                .remove(&maker_order_id)
+                .expect("matching order should exist");
+            let maker_market_id = maker.market_id;
+            let maker_side = maker.side;
+            let maker_price = maker.price;
+            let fill = state.execute_fill(&mut maker, &mut incoming, ExecutionReason::LIQUIDATION);
+
+            output.events.push(EventPublication {
+                key: fill.market_id.to_string(),
+                event: EngineEvent::TradeExecuted(fill),
+            });
+
+            if maker.remaining_quantity > 0 {
+                state.resting_orders.insert(maker.order_id, maker);
+            }
+
+            let level_quantity = state.aggregate_quantity(maker_market_id, maker_side, maker_price);
+            output.events.push(EventPublication {
+                key: maker_market_id.to_string(),
+                event: state.orderbook_delta_for_level(
+                    maker_market_id,
+                    maker_side,
+                    maker_price,
                     level_quantity,
                 ),
             });
@@ -285,8 +359,29 @@ impl EngineState {
             remaining_quantity: command.quantity,
             price: command.price,
             reduce_only: command.reduce_only,
+            settle_on_fill: true,
             margin_asset: reservation.asset,
             margin_remaining: reservation.remaining.max(1),
+        }
+    }
+
+    fn liquidation_order_from_command(
+        &self,
+        order_id: i64,
+        command: &LiquidatePosition,
+    ) -> RestingOrder {
+        RestingOrder {
+            order_id,
+            reservation_id: command.liquidation_id.clone(),
+            user_id: command.liquidated_user_id,
+            market_id: command.market_id,
+            side: opposite_side(command.position_side),
+            remaining_quantity: command.quantity,
+            price: command.price,
+            reduce_only: true,
+            settle_on_fill: false,
+            margin_asset: Asset::USDC,
+            margin_remaining: 0,
         }
     }
 
@@ -305,6 +400,7 @@ impl EngineState {
         &mut self,
         maker: &mut RestingOrder,
         taker: &mut RestingOrder,
+        execution_reason: ExecutionReason,
     ) -> TradeExecuted {
         let fill_quantity = maker.remaining_quantity.min(taker.remaining_quantity);
         let fill_price = if maker.price > 0 {
@@ -330,6 +426,14 @@ impl EngineState {
         self.decrease_reservation(&maker.reservation_id, maker_debit);
         self.decrease_reservation(&taker.reservation_id, taker_debit);
 
+        let mut settlements = Vec::new();
+        if maker.settle_on_fill {
+            settlements.push(settlement_for(maker, maker_debit));
+        }
+        if taker.settle_on_fill {
+            settlements.push(settlement_for(taker, taker_debit));
+        }
+
         TradeExecuted {
             engine_sequence: self.next_engine_sequence(maker.market_id),
             engine_timestamp_ms: unix_timestamp_ms(),
@@ -343,10 +447,8 @@ impl EngineState {
             taker_user_id: taker.user_id,
             maker_reservation_id: Some(maker.reservation_id.clone()),
             taker_reservation_id: Some(taker.reservation_id.clone()),
-            settlements: vec![
-                settlement_for(maker, maker_debit),
-                settlement_for(taker, taker_debit),
-            ],
+            execution_reason,
+            settlements,
         }
     }
 
@@ -432,8 +534,16 @@ struct RestingOrder {
     remaining_quantity: i64,
     price: i64,
     reduce_only: bool,
+    settle_on_fill: bool,
     margin_asset: Asset,
     margin_remaining: i64,
+}
+
+fn opposite_side(side: Side) -> Side {
+    match side {
+        Side::LONG => Side::SHORT,
+        Side::SHORT => Side::LONG,
+    }
 }
 
 fn prices_cross(maker: &RestingOrder, taker: &RestingOrder) -> bool {
@@ -474,7 +584,7 @@ fn settlement_for(order: &RestingOrder, debit_amount: i64) -> TradeSettlement {
 mod tests {
     use protocol::{
         common::{CommandEnvelope, OrderType},
-        engine::CancelOrder,
+        engine::{CancelOrder, LiquidatePosition},
         wallet::WalletFundsReserved,
     };
 
@@ -562,6 +672,7 @@ mod tests {
         assert_eq!(trade.maker_user_id, 1);
         assert_eq!(trade.taker_user_id, 2);
         assert_eq!(trade.quantity, 10);
+        assert_eq!(trade.execution_reason, ExecutionReason::TRADE);
         assert_eq!(trade.settlements.len(), 2);
         assert_eq!(trade.settlements[0].debit_amount, 1000);
 
@@ -676,6 +787,65 @@ mod tests {
     }
 
     #[test]
+    fn liquidation_command_matches_as_engine_authorized_reduce_only() {
+        let engine = FakeEngine::new(100, 200);
+        reserve(&engine, "req-maker", "res-maker", 1000);
+        let _ = engine.process_command(EngineCommand::PlaceOrder(order(
+            "req-maker",
+            "res-maker",
+            1,
+            Side::LONG,
+            10,
+            100,
+        )));
+
+        let output = engine.process_command(EngineCommand::LiquidatePosition(liquidate_position(
+            "req-liq",
+            "liq-1",
+            2,
+            Side::LONG,
+            10,
+            0,
+        )));
+
+        assert!(matches!(
+            output.replies[0].reply,
+            EngineReply::LiquidationAccepted(LiquidationAccepted { order_id: 101, .. })
+        ));
+
+        let EngineEvent::TradeExecuted(trade) = &output.events[0].event else {
+            panic!("expected liquidation trade");
+        };
+        assert_eq!(trade.execution_reason, ExecutionReason::LIQUIDATION);
+        assert_eq!(trade.maker_order_id, 100);
+        assert_eq!(trade.taker_order_id, 101);
+        assert_eq!(trade.taker_user_id, 2);
+        assert_eq!(trade.taker_reservation_id, Some(String::from("liq-1")));
+        assert_eq!(trade.settlements.len(), 1);
+        assert_eq!(trade.settlements[0].reservation_id, "res-maker");
+    }
+
+    #[test]
+    fn invalid_liquidation_command_is_rejected() {
+        let engine = FakeEngine::new(100, 200);
+
+        let output = engine.process_command(EngineCommand::LiquidatePosition(liquidate_position(
+            "req-liq",
+            "liq-1",
+            2,
+            Side::LONG,
+            0,
+            0,
+        )));
+
+        assert!(matches!(
+            output.replies[0].reply,
+            EngineReply::LiquidationRejected(LiquidationRejected { .. })
+        ));
+        assert!(output.events.is_empty());
+    }
+
+    #[test]
     fn cancel_resting_order_emits_cancel_event() {
         let engine = FakeEngine::new(100, 200);
         reserve(&engine, "req-1", "res-1", 500);
@@ -764,6 +934,26 @@ mod tests {
         };
         order.reduce_only = true;
         order
+    }
+
+    fn liquidate_position(
+        request_id: &str,
+        liquidation_id: &str,
+        liquidated_user_id: i64,
+        position_side: Side,
+        quantity: i64,
+        price: i64,
+    ) -> LiquidatePosition {
+        LiquidatePosition {
+            envelope: envelope(request_id, 0),
+            liquidation_id: String::from(liquidation_id),
+            market_id: 1,
+            market_name: String::from("SOL-PERP"),
+            liquidated_user_id,
+            position_side,
+            quantity,
+            price,
+        }
     }
 
     fn envelope(request_id: &str, user_id: i64) -> CommandEnvelope {

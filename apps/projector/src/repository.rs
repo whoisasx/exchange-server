@@ -3,6 +3,7 @@ use db::dto::{CloseType, MarginType, OrderStatus, OrderType as DbOrderType, Side
 use protocol::{
     common::{OrderType, Side},
     engine::{
+        ExecutionReason, LiquidatePosition, LiquidationAccepted, LiquidationRejected,
         OrderAccepted, OrderBookDelta, OrderBookLevel, OrderCancelled, OrderOpened, OrderRejected,
         ReservedPlaceOrder, TradeExecuted,
     },
@@ -158,6 +159,68 @@ impl ProjectorRepository {
         Ok(())
     }
 
+    pub async fn save_liquidation_context(
+        &self,
+        liquidation: &LiquidatePosition,
+        topic: &str,
+        partition: i32,
+        next_offset: i64,
+    ) -> Result<(), ProjectorRepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        let close_side = opposite_side(liquidation.position_side);
+        let order_type = if liquidation.price == 0 {
+            DbOrderType::MARKET
+        } else {
+            DbOrderType::LIMIT
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO projector_order_context(
+                reservation_id,
+                request_id,
+                user_id,
+                market_id,
+                market_name,
+                side,
+                order_type,
+                quantity,
+                price,
+                reduce_only
+            )
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,true)
+            ON CONFLICT(reservation_id)
+            DO UPDATE
+            SET request_id=EXCLUDED.request_id,
+                user_id=EXCLUDED.user_id,
+                market_id=EXCLUDED.market_id,
+                market_name=EXCLUDED.market_name,
+                side=EXCLUDED.side,
+                order_type=EXCLUDED.order_type,
+                quantity=EXCLUDED.quantity,
+                price=EXCLUDED.price,
+                reduce_only=EXCLUDED.reduce_only,
+                updated_at=NOW()
+            "#,
+        )
+        .bind(&liquidation.liquidation_id)
+        .bind(&liquidation.envelope.request_id)
+        .bind(liquidation.liquidated_user_id)
+        .bind(liquidation.market_id)
+        .bind(&liquidation.market_name)
+        .bind(close_side)
+        .bind(order_type)
+        .bind(liquidation.quantity)
+        .bind(liquidation.price)
+        .execute(&mut *tx)
+        .await?;
+
+        save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
+        tx.commit().await?;
+
+        Ok(())
+    }
+
     pub async fn mark_order_accepted(
         &self,
         reply: &OrderAccepted,
@@ -223,6 +286,75 @@ impl ProjectorRepository {
             .execute(&mut *tx)
             .await?;
         }
+
+        save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
+        tx.commit().await?;
+
+        Ok(())
+    }
+
+    pub async fn mark_liquidation_accepted(
+        &self,
+        reply: &LiquidationAccepted,
+        topic: &str,
+        partition: i32,
+        next_offset: i64,
+    ) -> Result<(), ProjectorRepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        let mut context = load_context_by_reservation_in_tx(&mut tx, &reply.liquidation_id).await?;
+        context.order_id = Some(reply.order_id);
+
+        sqlx::query(
+            r#"
+            UPDATE projector_order_context
+            SET order_id=$2,
+                status=CASE
+                    WHEN status IN ('OPEN','PARTIAL','FILLED','CANCELLED') THEN status
+                    ELSE 'ACCEPTED'
+                END,
+                reject_reason=NULL,
+                updated_at=NOW()
+            WHERE reservation_id=$1
+            "#,
+        )
+        .bind(&reply.liquidation_id)
+        .bind(reply.order_id)
+        .execute(&mut *tx)
+        .await?;
+
+        insert_order_if_missing_in_tx(&mut tx, &context, reply.order_id).await?;
+        save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
+        tx.commit().await?;
+
+        Ok(())
+    }
+
+    pub async fn mark_liquidation_rejected(
+        &self,
+        reply: &LiquidationRejected,
+        topic: &str,
+        partition: i32,
+        next_offset: i64,
+    ) -> Result<(), ProjectorRepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        let _ = load_context_by_reservation_in_tx(&mut tx, &reply.liquidation_id).await?;
+
+        sqlx::query(
+            r#"
+            UPDATE projector_order_context
+            SET status=CASE
+                    WHEN status IN ('ACCEPTED','OPEN','PARTIAL','FILLED','CANCELLED') THEN status
+                    ELSE 'REJECTED'
+                END,
+                reject_reason=$2,
+                updated_at=NOW()
+            WHERE reservation_id=$1
+            "#,
+        )
+        .bind(&reply.liquidation_id)
+        .bind(&reply.reason)
+        .execute(&mut *tx)
+        .await?;
 
         save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
         tx.commit().await?;
@@ -400,6 +532,7 @@ impl ProjectorRepository {
                 event.price,
                 event.quantity,
                 event.engine_timestamp_ms,
+                event.execution_reason,
             )
             .await?;
             project_position_for_fill_in_tx(
@@ -410,6 +543,7 @@ impl ProjectorRepository {
                 event.price,
                 event.quantity,
                 event.engine_timestamp_ms,
+                event.execution_reason,
             )
             .await?;
             refresh_position_pnl_for_market_in_tx(
@@ -612,6 +746,7 @@ async fn project_position_for_fill_in_tx(
     price: i64,
     quantity: i64,
     engine_timestamp_ms: i64,
+    execution_reason: ExecutionReason,
 ) -> Result<(), ProjectorRepositoryError> {
     let position = load_position_for_update_in_tx(tx, context.user_id, context.market_id).await?;
 
@@ -644,6 +779,7 @@ async fn project_position_for_fill_in_tx(
                 price,
                 quantity,
                 engine_timestamp_ms,
+                execution_reason,
             )
             .await
         }
@@ -831,6 +967,7 @@ async fn reduce_or_reverse_position_in_tx(
     price: i64,
     quantity: i64,
     engine_timestamp_ms: i64,
+    execution_reason: ExecutionReason,
 ) -> Result<(), ProjectorRepositoryError> {
     let closed_quantity = position.quantity.min(quantity);
     let closed_margin =
@@ -846,6 +983,7 @@ async fn reduce_or_reverse_position_in_tx(
         price,
         closed_margin,
         engine_timestamp_ms,
+        close_type_from_execution_reason(execution_reason),
     )
     .await?;
 
@@ -906,6 +1044,7 @@ async fn insert_closed_position_in_tx(
     exit_price: i64,
     initial_margin: i64,
     engine_timestamp_ms: i64,
+    close_reason: CloseType,
 ) -> Result<i64, ProjectorRepositoryError> {
     let closed_position_id = next_projector_position_id_in_tx(tx).await?;
     let open_order_id = position.open_order_id.unwrap_or(close_order_id);
@@ -952,7 +1091,7 @@ async fn insert_closed_position_in_tx(
     .bind(engine_timestamp_ms)
     .bind(open_order_id)
     .bind(close_order_id)
-    .bind(CloseType::TRADE)
+    .bind(close_reason)
     .execute(&mut **tx)
     .await?;
 
@@ -1419,10 +1558,24 @@ fn side_to_db(side: Side) -> SideType {
     }
 }
 
+fn opposite_side(side: Side) -> SideType {
+    match side {
+        Side::LONG => SideType::SHORT,
+        Side::SHORT => SideType::LONG,
+    }
+}
+
 fn order_type_to_db(order_type: OrderType) -> DbOrderType {
     match order_type {
         OrderType::LIMIT => DbOrderType::LIMIT,
         OrderType::MARKET => DbOrderType::MARKET,
+    }
+}
+
+fn close_type_from_execution_reason(execution_reason: ExecutionReason) -> CloseType {
+    match execution_reason {
+        ExecutionReason::TRADE => CloseType::TRADE,
+        ExecutionReason::LIQUIDATION => CloseType::LIQUIDATION,
     }
 }
 
@@ -1524,6 +1677,18 @@ mod tests {
     fn protocol_order_type_mapping_matches_db_names() {
         assert_eq!(order_type_to_db(OrderType::LIMIT), DbOrderType::LIMIT);
         assert_eq!(order_type_to_db(OrderType::MARKET), DbOrderType::MARKET);
+    }
+
+    #[test]
+    fn execution_reason_maps_to_closed_position_reason() {
+        assert_eq!(
+            close_type_from_execution_reason(ExecutionReason::TRADE),
+            CloseType::TRADE
+        );
+        assert_eq!(
+            close_type_from_execution_reason(ExecutionReason::LIQUIDATION),
+            CloseType::LIQUIDATION
+        );
     }
 
     #[test]
