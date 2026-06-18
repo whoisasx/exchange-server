@@ -797,12 +797,6 @@ async fn wait_for_open_position_api(
 }
 
 fn is_expected_position(value: &Value, user_id: i64, side: &str) -> bool {
-    let liquidation_price = match side {
-        "LONG" => 5,
-        "SHORT" => 195,
-        _ => return false,
-    };
-
     value.get("user_id").and_then(Value::as_i64) == Some(user_id)
         && value.get("market_id").and_then(Value::as_i64) == Some(MARKET_ID)
         && value.get("side").and_then(Value::as_str) == Some(side)
@@ -810,8 +804,6 @@ fn is_expected_position(value: &Value, user_id: i64, side: &str) -> bool {
         && value.get("average_price").and_then(Value::as_i64) == Some(100)
         && value.get("initial_margin").and_then(Value::as_i64) == Some(1000)
         && value.get("unrealized_pnl").and_then(Value::as_i64) == Some(0)
-        && value.get("maintenance_margin").and_then(Value::as_i64) == Some(50)
-        && value.get("liquidation_price").and_then(Value::as_i64) == Some(liquidation_price)
 }
 
 async fn wait_for_no_open_position_api(

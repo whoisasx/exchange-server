@@ -9,9 +9,6 @@ use protocol::{
 };
 use sqlx::{Pool, Postgres, Row};
 
-const MAINTENANCE_MARGIN_BPS: i64 = 500;
-const BPS_DENOMINATOR: i64 = 10_000;
-
 #[derive(Debug)]
 pub enum ProjectorRepositoryError {
     MissingOrderContext {
@@ -58,13 +55,6 @@ struct StoredPosition {
     average_price: i64,
     opened_at: DateTime<Utc>,
     open_order_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PositionRisk {
-    unrealized_pnl: i64,
-    maintenance_margin: i64,
-    liquidation_price: i64,
 }
 
 #[derive(Clone)]
@@ -422,7 +412,7 @@ impl ProjectorRepository {
                 event.engine_timestamp_ms,
             )
             .await?;
-            refresh_position_risk_for_market_in_tx(
+            refresh_position_pnl_for_market_in_tx(
                 &mut tx,
                 event.market_id,
                 event.price,
@@ -660,7 +650,7 @@ async fn project_position_for_fill_in_tx(
     }
 }
 
-async fn refresh_position_risk_for_market_in_tx(
+async fn refresh_position_pnl_for_market_in_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     market_id: i64,
     mark_price: i64,
@@ -672,7 +662,6 @@ async fn refresh_position_risk_for_market_in_tx(
             position_id,
             side,
             quantity,
-            initial_margin,
             average_price
         FROM positions
         WHERE market_id=$1
@@ -684,28 +673,23 @@ async fn refresh_position_risk_for_market_in_tx(
     .await?;
 
     for row in rows {
-        let risk = position_risk(
+        let unrealized_pnl = unrealized_pnl(
             row.get("side"),
             row.get("average_price"),
-            row.get("quantity"),
-            row.get("initial_margin"),
             mark_price,
+            row.get("quantity"),
         );
 
         sqlx::query(
             r#"
             UPDATE positions
             SET unrealized_pnl=$2,
-                maintenance_margin=$3,
-                liquidation_price=$4,
-                updated_at=TO_TIMESTAMP($5::DOUBLE PRECISION / 1000.0)
+                updated_at=TO_TIMESTAMP($3::DOUBLE PRECISION / 1000.0)
             WHERE position_id=$1
             "#,
         )
         .bind(row.get::<i64, _>("position_id"))
-        .bind(risk.unrealized_pnl)
-        .bind(risk.maintenance_margin)
-        .bind(risk.liquidation_price)
+        .bind(unrealized_pnl)
         .bind(engine_timestamp_ms)
         .execute(&mut **tx)
         .await?;
@@ -1498,27 +1482,6 @@ fn realized_pnl(side: SideType, entry_price: i64, exit_price: i64, quantity: i64
     clamp_i128_to_i64(price_delta.saturating_mul(quantity as i128))
 }
 
-fn position_risk(
-    side: SideType,
-    average_price: i64,
-    quantity: i64,
-    initial_margin: i64,
-    mark_price: i64,
-) -> PositionRisk {
-    let maintenance_margin = maintenance_margin(average_price, quantity);
-    PositionRisk {
-        unrealized_pnl: unrealized_pnl(side, average_price, mark_price, quantity),
-        maintenance_margin,
-        liquidation_price: liquidation_price(
-            side,
-            average_price,
-            quantity,
-            initial_margin,
-            maintenance_margin,
-        ),
-    }
-}
-
 fn unrealized_pnl(side: SideType, average_price: i64, mark_price: i64, quantity: i64) -> i64 {
     if quantity <= 0 {
         return 0;
@@ -1530,38 +1493,6 @@ fn unrealized_pnl(side: SideType, average_price: i64, mark_price: i64, quantity:
     };
 
     clamp_i128_to_i64(price_delta.saturating_mul(quantity as i128))
-}
-
-fn maintenance_margin(average_price: i64, quantity: i64) -> i64 {
-    if average_price <= 0 || quantity <= 0 {
-        return 0;
-    }
-
-    let margin = (average_price as i128)
-        .saturating_mul(quantity as i128)
-        .saturating_mul(MAINTENANCE_MARGIN_BPS as i128)
-        / BPS_DENOMINATOR as i128;
-    clamp_i128_to_i64(margin).max(1)
-}
-
-fn liquidation_price(
-    side: SideType,
-    average_price: i64,
-    quantity: i64,
-    initial_margin: i64,
-    maintenance_margin: i64,
-) -> i64 {
-    if average_price <= 0 || quantity <= 0 {
-        return 0;
-    }
-
-    let buffer_per_unit = (initial_margin as i128 - maintenance_margin as i128) / quantity as i128;
-    let raw_price = match side {
-        SideType::LONG => average_price as i128 - buffer_per_unit,
-        SideType::SHORT => average_price as i128 + buffer_per_unit,
-    };
-
-    clamp_i128_to_i64(raw_price).max(0)
 }
 
 fn clamp_i128_to_i64(value: i128) -> i64 {
@@ -1625,42 +1556,9 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_margin_uses_fixed_bps_of_notional() {
-        assert_eq!(maintenance_margin(100, 10), 50);
-        assert_eq!(maintenance_margin(1, 1), 1);
-        assert_eq!(maintenance_margin(0, 10), 0);
-        assert_eq!(maintenance_margin(100, 0), 0);
-    }
-
-    #[test]
-    fn liquidation_price_uses_isolated_margin_buffer() {
-        assert_eq!(liquidation_price(SideType::LONG, 100, 10, 1000, 50), 5);
-        assert_eq!(liquidation_price(SideType::SHORT, 100, 10, 1000, 50), 195);
-        assert_eq!(liquidation_price(SideType::LONG, 100, 10, 25, 50), 102);
-        assert_eq!(liquidation_price(SideType::SHORT, 100, 10, 25, 50), 98);
-    }
-
-    #[test]
-    fn position_risk_combines_projected_fields() {
-        assert_eq!(
-            position_risk(SideType::LONG, 100, 10, 1000, 120),
-            PositionRisk {
-                unrealized_pnl: 200,
-                maintenance_margin: 50,
-                liquidation_price: 5,
-            }
-        );
-    }
-
-    #[test]
-    fn risk_math_clamps_large_values() {
+    fn unrealized_pnl_clamps_large_values() {
         assert_eq!(
             unrealized_pnl(SideType::LONG, 0, i64::MAX, i64::MAX),
-            i64::MAX
-        );
-        assert_eq!(maintenance_margin(i64::MAX, i64::MAX), i64::MAX);
-        assert_eq!(
-            liquidation_price(SideType::SHORT, i64::MAX, 1, i64::MAX, 0),
             i64::MAX
         );
     }
