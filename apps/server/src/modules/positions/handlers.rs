@@ -20,7 +20,10 @@ use crate::{
     utils::types::ResponseBody,
 };
 
+const DEFAULT_CLOSE_LEVERAGE: i64 = 1;
 const DEFAULT_CLOSE_MARGIN: i64 = 1;
+const MIN_LEVERAGE: i64 = 1;
+const MAX_LEVERAGE: i64 = 100;
 
 #[derive(Deserialize)]
 pub struct ClosePositionRequest {
@@ -30,10 +33,16 @@ pub struct ClosePositionRequest {
     pub margin: Option<i64>,
     #[serde(default = "default_margin_asset")]
     pub margin_asset: AssetType,
+    #[serde(default = "default_close_leverage")]
+    pub leverage: i64,
 }
 
 fn default_margin_asset() -> AssetType {
     AssetType::USDC
+}
+
+fn default_close_leverage() -> i64 {
+    DEFAULT_CLOSE_LEVERAGE
 }
 
 fn authenticated_user(req: &HttpRequest) -> Result<Claim, HttpResponse> {
@@ -130,9 +139,12 @@ pub async fn close_position(
         return bad_request("price cannot be negative");
     }
 
-    let margin = request.margin.unwrap_or(DEFAULT_CLOSE_MARGIN);
-    if margin <= 0 {
-        return bad_request("margin must be greater than zero");
+    let required_margin = match close_required_margin(request.margin) {
+        Ok(margin) => margin,
+        Err(message) => return bad_request(message),
+    };
+    if let Err(message) = validate_close_leverage(request.leverage) {
+        return bad_request(message);
     }
 
     let closing_side = match position.side {
@@ -167,7 +179,8 @@ pub async fn close_position(
         quantity,
         price,
         margin_asset: asset_to_protocol(request.margin_asset),
-        required_margin: margin,
+        required_margin,
+        leverage: request.leverage,
         reduce_only: true,
     });
     let key = claim.userid.to_string();
@@ -186,6 +199,23 @@ pub async fn close_position(
     }
 
     final_or_queued_response(receiver, context.wait_timeout, context.ack).await
+}
+
+fn close_required_margin(margin: Option<i64>) -> Result<i64, String> {
+    let margin = margin.unwrap_or(DEFAULT_CLOSE_MARGIN);
+    if margin <= 0 {
+        return Err(String::from("margin must be greater than zero"));
+    }
+    Ok(margin)
+}
+
+fn validate_close_leverage(leverage: i64) -> Result<(), String> {
+    if !(MIN_LEVERAGE..=MAX_LEVERAGE).contains(&leverage) {
+        return Err(format!(
+            "leverage must be between {MIN_LEVERAGE} and {MAX_LEVERAGE}"
+        ));
+    }
+    Ok(())
 }
 
 #[post("/liquidate")]
@@ -239,5 +269,34 @@ mod tests {
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn close_position_request_defaults_match_protocol_order_defaults() {
+        let request: ClosePositionRequest =
+            serde_json::from_value(json!({"market_id": 1})).expect("request should deserialize");
+
+        assert_eq!(request.leverage, DEFAULT_CLOSE_LEVERAGE);
+        assert_eq!(
+            close_required_margin(request.margin),
+            Ok(DEFAULT_CLOSE_MARGIN)
+        );
+    }
+
+    #[actix_web::test]
+    async fn close_position_rejects_non_positive_margin() {
+        let zero = close_required_margin(Some(0)).expect_err("margin should be invalid");
+        let negative = close_required_margin(Some(-1)).expect_err("margin should be invalid");
+
+        assert_eq!(zero, "margin must be greater than zero");
+        assert_eq!(negative, "margin must be greater than zero");
+    }
+
+    #[actix_web::test]
+    async fn close_position_rejects_invalid_leverage() {
+        let error =
+            validate_close_leverage(MAX_LEVERAGE + 1).expect_err("leverage should be invalid");
+
+        assert_eq!(error, "leverage must be between 1 and 100");
     }
 }

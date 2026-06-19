@@ -3,11 +3,12 @@ use db::dto::{CloseType, MarginType, OrderStatus, OrderType as DbOrderType, Side
 use protocol::{
     common::{OrderType, Side},
     engine::{
-        ExecutionReason, LiquidatePosition, LiquidationAccepted, LiquidationRejected,
+        EngineEvent, ExecutionReason, LiquidatePosition, LiquidationAccepted, LiquidationRejected,
         OrderAccepted, OrderBookDelta, OrderBookLevel, OrderCancelled, OrderOpened, OrderRejected,
         ReservedPlaceOrder, TradeExecuted,
     },
 };
+use serde_json::Value;
 use sqlx::{Pool, Postgres, Row};
 
 #[derive(Debug)]
@@ -16,6 +17,7 @@ pub enum ProjectorRepositoryError {
         reservation_id: Option<String>,
         order_id: Option<i64>,
     },
+    Serialization(serde_json::Error),
     Storage(sqlx::Error),
 }
 
@@ -28,6 +30,12 @@ impl ProjectorRepositoryError {
 impl From<sqlx::Error> for ProjectorRepositoryError {
     fn from(error: sqlx::Error) -> Self {
         Self::Storage(error)
+    }
+}
+
+impl From<serde_json::Error> for ProjectorRepositoryError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Serialization(error)
     }
 }
 
@@ -56,6 +64,26 @@ struct StoredPosition {
     average_price: i64,
     opened_at: DateTime<Utc>,
     open_order_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct EngineEventLogEntry {
+    engine_event_id: String,
+    event_type: &'static str,
+    market_id: Option<i64>,
+    engine_sequence: Option<i64>,
+    engine_timestamp_ms: i64,
+    payload: Value,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EngineEventLogMetadata<'a> {
+    event_type: &'static str,
+    engine_event_id: Option<&'a str>,
+    market_id: Option<i64>,
+    engine_sequence: Option<i64>,
+    engine_timestamp_ms: i64,
+    checkpoint_id: Option<&'a str>,
 }
 
 #[derive(Clone)]
@@ -229,8 +257,7 @@ impl ProjectorRepository {
         next_offset: i64,
     ) -> Result<(), ProjectorRepositoryError> {
         let mut tx = self.pool.begin().await?;
-        let mut context = load_context_by_reservation_in_tx(&mut tx, &reply.reservation_id).await?;
-        context.order_id = Some(reply.order_id);
+        let _ = load_context_by_reservation_in_tx(&mut tx, &reply.reservation_id).await?;
 
         sqlx::query(
             r#"
@@ -250,7 +277,6 @@ impl ProjectorRepository {
         .execute(&mut *tx)
         .await?;
 
-        insert_order_if_missing_in_tx(&mut tx, &context, reply.order_id).await?;
         save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
         tx.commit().await?;
 
@@ -301,8 +327,7 @@ impl ProjectorRepository {
         next_offset: i64,
     ) -> Result<(), ProjectorRepositoryError> {
         let mut tx = self.pool.begin().await?;
-        let mut context = load_context_by_reservation_in_tx(&mut tx, &reply.liquidation_id).await?;
-        context.order_id = Some(reply.order_id);
+        let _ = load_context_by_reservation_in_tx(&mut tx, &reply.liquidation_id).await?;
 
         sqlx::query(
             r#"
@@ -322,7 +347,6 @@ impl ProjectorRepository {
         .execute(&mut *tx)
         .await?;
 
-        insert_order_if_missing_in_tx(&mut tx, &context, reply.order_id).await?;
         save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
         tx.commit().await?;
 
@@ -607,6 +631,241 @@ impl ProjectorRepository {
         tx.commit().await?;
 
         Ok(())
+    }
+
+    pub async fn project_engine_event_log(
+        &self,
+        event: &EngineEvent,
+        topic: &str,
+        partition: i32,
+        next_offset: i64,
+    ) -> Result<(), ProjectorRepositoryError> {
+        let entry = engine_event_log_entry(event)?;
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO engine_event_log(
+                engine_event_id,
+                event_type,
+                market_id,
+                engine_sequence,
+                engine_timestamp_ms,
+                topic,
+                partition,
+                offset_value,
+                payload
+            )
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT(engine_event_id) DO NOTHING
+            "#,
+        )
+        .bind(&entry.engine_event_id)
+        .bind(entry.event_type)
+        .bind(entry.market_id)
+        .bind(entry.engine_sequence)
+        .bind(entry.engine_timestamp_ms)
+        .bind(topic)
+        .bind(partition)
+        .bind(next_offset - 1)
+        .bind(&entry.payload)
+        .execute(&mut *tx)
+        .await?;
+
+        save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
+        tx.commit().await?;
+
+        Ok(())
+    }
+}
+
+fn engine_event_log_entry(
+    event: &EngineEvent,
+) -> Result<EngineEventLogEntry, ProjectorRepositoryError> {
+    let metadata = engine_event_log_metadata(event);
+    let payload = serde_json::to_value(event)?;
+
+    Ok(EngineEventLogEntry {
+        engine_event_id: engine_event_log_id(metadata),
+        event_type: metadata.event_type,
+        market_id: metadata.market_id,
+        engine_sequence: metadata.engine_sequence,
+        engine_timestamp_ms: metadata.engine_timestamp_ms,
+        payload,
+    })
+}
+
+fn engine_event_log_id(metadata: EngineEventLogMetadata<'_>) -> String {
+    if let Some(engine_event_id) = metadata.engine_event_id.filter(|id| !id.is_empty()) {
+        return engine_event_id.to_owned();
+    }
+
+    if let Some(checkpoint_id) = metadata.checkpoint_id.filter(|id| !id.is_empty()) {
+        return format!("checkpoint:{checkpoint_id}");
+    }
+
+    match (metadata.market_id, metadata.engine_sequence) {
+        (Some(market_id), Some(engine_sequence)) => {
+            format!("{}:{market_id}:{engine_sequence}", metadata.event_type)
+        }
+        _ => format!("{}:{}", metadata.event_type, metadata.engine_timestamp_ms),
+    }
+}
+
+fn engine_event_log_metadata(event: &EngineEvent) -> EngineEventLogMetadata<'_> {
+    match event {
+        EngineEvent::OrderOpened(event) => EngineEventLogMetadata {
+            event_type: "OrderOpened",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::OrderCancelled(event) => EngineEventLogMetadata {
+            event_type: "OrderCancelled",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::OrderExpired(event) => EngineEventLogMetadata {
+            event_type: "OrderExpired",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::ReservationReleased(event) => EngineEventLogMetadata {
+            event_type: "ReservationReleased",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::TradeExecuted(event) => EngineEventLogMetadata {
+            event_type: "TradeExecuted",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::OrderBookDelta(event) => EngineEventLogMetadata {
+            event_type: "OrderBookDelta",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::MarkPriceUpdated(event) => EngineEventLogMetadata {
+            event_type: "MarkPriceUpdated",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::FundingRateUpdated(event) => EngineEventLogMetadata {
+            event_type: "FundingRateUpdated",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::FundingPaymentApplied(event) => EngineEventLogMetadata {
+            event_type: "FundingPaymentApplied",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::PositionChanged(event) => EngineEventLogMetadata {
+            event_type: "PositionChanged",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::RiskStateUpdated(event) => EngineEventLogMetadata {
+            event_type: "RiskStateUpdated",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::FeeCharged(event) => EngineEventLogMetadata {
+            event_type: "FeeCharged",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::LiquidationStarted(event) => EngineEventLogMetadata {
+            event_type: "LiquidationStarted",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::LiquidationExecuted(event) => EngineEventLogMetadata {
+            event_type: "LiquidationExecuted",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::LiquidationCompleted(event) => EngineEventLogMetadata {
+            event_type: "LiquidationCompleted",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::AdlExecuted(event) => EngineEventLogMetadata {
+            event_type: "AdlExecuted",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::AccountDelta(event) => EngineEventLogMetadata {
+            event_type: "AccountDelta",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::OrderBookSnapshotCreated(event) => EngineEventLogMetadata {
+            event_type: "OrderBookSnapshotCreated",
+            engine_event_id: event.engine_event_id.as_deref(),
+            market_id: Some(event.market_id),
+            engine_sequence: Some(event.engine_sequence),
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: None,
+        },
+        EngineEvent::EngineCheckpointCommitted(event) => EngineEventLogMetadata {
+            event_type: "EngineCheckpointCommitted",
+            engine_event_id: None,
+            market_id: None,
+            engine_sequence: None,
+            engine_timestamp_ms: event.engine_timestamp_ms,
+            checkpoint_id: Some(event.checkpoint_id.as_str()),
+        },
     }
 }
 
@@ -1726,5 +1985,86 @@ mod tests {
             unrealized_pnl(SideType::LONG, 0, i64::MAX, i64::MAX),
             i64::MAX
         );
+    }
+
+    #[test]
+    fn engine_event_log_entry_uses_engine_event_id() {
+        let event = EngineEvent::RiskStateUpdated(protocol::engine::RiskStateUpdated {
+            engine_event_id: Some(String::from("eng-1")),
+            market_id: 7,
+            engine_sequence: 42,
+            engine_timestamp_ms: 1_710_000_000_000,
+            source_input_id: Some(String::from("input-1")),
+            source_input_offset: None,
+            user_id: 99,
+            position_id: String::from("pos-1"),
+            mark_price: 100,
+            equity: 1_000,
+            maintenance_margin: 100,
+            margin_ratio: 10,
+            status: String::from("HEALTHY"),
+        });
+
+        let entry = engine_event_log_entry(&event).expect("event should serialize");
+
+        assert_eq!(entry.engine_event_id, "eng-1");
+        assert_eq!(entry.event_type, "RiskStateUpdated");
+        assert_eq!(entry.market_id, Some(7));
+        assert_eq!(entry.engine_sequence, Some(42));
+        assert_eq!(entry.engine_timestamp_ms, 1_710_000_000_000);
+        assert_eq!(entry.payload["type"], "RiskStateUpdated");
+        assert_eq!(entry.payload["payload"]["engine_event_id"], "eng-1");
+    }
+
+    #[test]
+    fn engine_event_log_entry_falls_back_for_legacy_event_without_id() {
+        let event = EngineEvent::FundingRateUpdated(protocol::engine::FundingRateUpdated {
+            engine_event_id: None,
+            market_id: 7,
+            engine_sequence: 43,
+            engine_timestamp_ms: 1_710_000_000_001,
+            source_input_id: None,
+            source_input_offset: Some(123),
+            funding_interval_id: String::from("funding-1"),
+            rate: 12,
+            rate_scale: 1_000_000,
+            interval_start_ms: 1_710_000_000_000,
+            interval_end_ms: 1_710_003_600_000,
+        });
+
+        let entry = engine_event_log_entry(&event).expect("event should serialize");
+
+        assert_eq!(entry.engine_event_id, "FundingRateUpdated:7:43");
+        assert_eq!(entry.event_type, "FundingRateUpdated");
+        assert_eq!(entry.market_id, Some(7));
+        assert_eq!(entry.engine_sequence, Some(43));
+    }
+
+    #[test]
+    fn engine_event_log_entry_uses_checkpoint_id_for_checkpoint_events() {
+        let event =
+            EngineEvent::EngineCheckpointCommitted(protocol::engine::EngineCheckpointCommitted {
+                checkpoint_id: String::from("checkpoint-1"),
+                engine_timestamp_ms: 1_710_000_000_002,
+                schema_version: 1,
+                engine_build: String::from("dev"),
+                config_hash: String::from("cfg-1"),
+                engine_input_next_offset: 321,
+                uri: String::from("s3://bucket/checkpoint-1"),
+                checksum_sha256: String::from("checksum"),
+                byte_size: 1024,
+                market_sequences: vec![protocol::engine::MarketSequence {
+                    market_id: 7,
+                    engine_sequence: 43,
+                }],
+            });
+
+        let entry = engine_event_log_entry(&event).expect("event should serialize");
+
+        assert_eq!(entry.engine_event_id, "checkpoint:checkpoint-1");
+        assert_eq!(entry.event_type, "EngineCheckpointCommitted");
+        assert_eq!(entry.market_id, None);
+        assert_eq!(entry.engine_sequence, None);
+        assert_eq!(entry.engine_timestamp_ms, 1_710_000_000_002);
     }
 }

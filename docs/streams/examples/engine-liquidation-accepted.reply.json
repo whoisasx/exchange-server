@@ -1,8 +1,0 @@
-{
-  "type": "LiquidationAccepted",
-  "payload": {
-    "request_id": "req_liq_001",
-    "liquidation_id": "liq_001",
-    "order_id": 9003
-  }
-}

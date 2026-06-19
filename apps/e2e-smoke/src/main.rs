@@ -18,8 +18,32 @@ use tokio_tungstenite::{
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-const MARKET_ID: i64 = 1;
-const MARKET_NAME: &str = "SOL-PERP";
+#[derive(Debug, Clone, Copy)]
+struct MarketSpec {
+    id: i64,
+    name: &'static str,
+    base_asset: &'static str,
+    price: i64,
+    quantity: i64,
+    margin: i64,
+}
+
+const PRIMARY_MARKET: MarketSpec = MarketSpec {
+    id: 1,
+    name: "SOL-PERP",
+    base_asset: "SOL",
+    price: 100,
+    quantity: 10,
+    margin: 1000,
+};
+const SECONDARY_MARKET: MarketSpec = MarketSpec {
+    id: 2,
+    name: "ETH-PERP",
+    base_asset: "ETH",
+    price: 100,
+    quantity: 3,
+    margin: 300,
+};
 
 #[derive(Debug, Clone)]
 struct Settings {
@@ -61,102 +85,147 @@ async fn main() -> Result<()> {
         .await
         .context("failed to connect to smoke database")?;
 
-    wait_for_server(&client, &settings.server_url).await?;
-    upsert_market(&pool).await?;
+    wait_for_server(&client, &settings.server_url, PRIMARY_MARKET).await?;
+    upsert_market(&pool, PRIMARY_MARKET).await?;
+    upsert_market(&pool, SECONDARY_MARKET).await?;
 
     let run_id = unix_millis();
     let alice = signup(&client, &settings.server_url, &format!("alice-{run_id}")).await?;
     let bob = signup(&client, &settings.server_url, &format!("bob-{run_id}")).await?;
+    let dave = signup(&client, &settings.server_url, &format!("dave-{run_id}")).await?;
+    let erin = signup(&client, &settings.server_url, &format!("erin-{run_id}")).await?;
 
     println!(
-        "created smoke users {}={} {}={}",
-        alice.username, alice.userid, bob.username, bob.userid
+        "created smoke users {}={} {}={} {}={} {}={}",
+        alice.username,
+        alice.userid,
+        bob.username,
+        bob.userid,
+        dave.username,
+        dave.userid,
+        erin.username,
+        erin.userid
     );
 
     let mut alice_ws = connect_ws(&settings.ws_url, &alice.jwt_token).await?;
     let mut bob_ws = connect_ws(&settings.ws_url, &bob.jwt_token).await?;
-    subscribe_market(&mut alice_ws).await?;
-    subscribe_market(&mut bob_ws).await?;
+    let mut dave_ws = connect_ws(&settings.ws_url, &dave.jwt_token).await?;
+    let mut erin_ws = connect_ws(&settings.ws_url, &erin.jwt_token).await?;
+    subscribe_market(&mut alice_ws, PRIMARY_MARKET).await?;
+    subscribe_market(&mut bob_ws, PRIMARY_MARKET).await?;
+    subscribe_market(&mut dave_ws, SECONDARY_MARKET).await?;
+    subscribe_market(&mut erin_ws, SECONDARY_MARKET).await?;
 
-    command(
-        &client,
-        &settings.server_url,
-        &alice.jwt_token,
-        &format!("deposit-alice-{run_id}"),
-        "/balance/",
-        json!({"asset":"USDC","amount":10000,"reference_id":format!("deposit-alice-{run_id}")}),
-    )
-    .await
-    .context("alice deposit failed")?;
-    command(
-        &client,
-        &settings.server_url,
-        &bob.jwt_token,
-        &format!("deposit-bob-{run_id}"),
-        "/balance/",
-        json!({"asset":"USDC","amount":10000,"reference_id":format!("deposit-bob-{run_id}")}),
-    )
-    .await
-    .context("bob deposit failed")?;
+    for user in [&alice, &bob, &dave, &erin] {
+        deposit_usdc(
+            &client,
+            &settings.server_url,
+            user,
+            &format!("deposit-{}", user.username),
+        )
+        .await?;
+    }
 
-    command(
+    place_limit_order(
         &client,
         &settings.server_url,
-        &alice.jwt_token,
-        &format!("order-alice-{run_id}"),
-        "/orders/",
-        json!({
-            "market_id": MARKET_ID,
-            "market_name": MARKET_NAME,
-            "side": "LONG",
-            "order_type": "LIMIT",
-            "quantity": 10,
-            "price": 100,
-            "margin": 1000,
-            "margin_asset": "USDC"
-        }),
+        &dave,
+        &format!("order-dave-secondary-bid-{run_id}"),
+        SECONDARY_MARKET,
+        "LONG",
     )
-    .await
-    .context("alice order failed")?;
+    .await?;
+
+    wait_for_message(
+        &dave_ws.messages,
+        "dave secondary market orderbook bid",
+        |value| is_market_orderbook_bid(value, SECONDARY_MARKET),
+    )
+    .await?;
+    wait_for_message(
+        &erin_ws.messages,
+        "erin secondary market orderbook bid",
+        |value| is_market_orderbook_bid(value, SECONDARY_MARKET),
+    )
+    .await?;
+    wait_for_orderbook_snapshot(&client, &settings.server_url, SECONDARY_MARKET).await?;
+
+    place_limit_order(
+        &client,
+        &settings.server_url,
+        &alice,
+        &format!("order-alice-primary-bid-{run_id}"),
+        PRIMARY_MARKET,
+        "LONG",
+    )
+    .await?;
 
     wait_for_message(
         &alice_ws.messages,
-        "alice market orderbook bid",
-        is_market_orderbook_bid,
+        "alice primary market orderbook bid",
+        |value| is_market_orderbook_bid(value, PRIMARY_MARKET),
     )
     .await?;
-    wait_for_orderbook_snapshot(&client, &settings.server_url).await?;
+    wait_for_message(
+        &bob_ws.messages,
+        "bob primary market orderbook bid",
+        |value| is_market_orderbook_bid(value, PRIMARY_MARKET),
+    )
+    .await?;
+    wait_for_orderbook_snapshot(&client, &settings.server_url, PRIMARY_MARKET).await?;
+    wait_for_orderbook_snapshot(&client, &settings.server_url, SECONDARY_MARKET).await?;
+    assert_market_events_only(
+        &alice_ws.messages,
+        "alice primary websocket",
+        &[PRIMARY_MARKET.id],
+    )
+    .await?;
+    assert_market_events_only(
+        &bob_ws.messages,
+        "bob primary websocket",
+        &[PRIMARY_MARKET.id],
+    )
+    .await?;
+    assert_market_events_only(
+        &dave_ws.messages,
+        "dave secondary websocket",
+        &[SECONDARY_MARKET.id],
+    )
+    .await?;
+    assert_market_events_only(
+        &erin_ws.messages,
+        "erin secondary websocket",
+        &[SECONDARY_MARKET.id],
+    )
+    .await?;
 
-    command(
+    place_limit_order(
         &client,
         &settings.server_url,
-        &bob.jwt_token,
-        &format!("order-bob-{run_id}"),
-        "/orders/",
-        json!({
-            "market_id": MARKET_ID,
-            "market_name": MARKET_NAME,
-            "side": "SHORT",
-            "order_type": "LIMIT",
-            "quantity": 10,
-            "price": 100,
-            "margin": 1000,
-            "margin_asset": "USDC"
-        }),
+        &bob,
+        &format!("order-bob-primary-fill-{run_id}"),
+        PRIMARY_MARKET,
+        "SHORT",
     )
-    .await
-    .context("bob order failed")?;
+    .await?;
 
     wait_for_message(&alice_ws.messages, "alice account trade", is_account_trade).await?;
     wait_for_message(&bob_ws.messages, "bob account trade", is_account_trade).await?;
-    wait_for_message(&alice_ws.messages, "alice market trade", is_market_trade).await?;
-    wait_for_message(&bob_ws.messages, "bob market trade", is_market_trade).await?;
+    wait_for_message(&alice_ws.messages, "alice primary market trade", |value| {
+        is_market_trade(value, PRIMARY_MARKET)
+    })
+    .await?;
+    wait_for_message(&bob_ws.messages, "bob primary market trade", |value| {
+        is_market_trade(value, PRIMARY_MARKET)
+    })
+    .await?;
     wait_for_message(
         &alice_ws.messages,
-        "alice market orderbook clear",
-        is_market_orderbook_clear,
+        "alice primary market orderbook clear",
+        |value| is_market_orderbook_clear(value, PRIMARY_MARKET),
     )
     .await?;
+    wait_for_empty_orderbook_snapshot(&client, &settings.server_url, PRIMARY_MARKET).await?;
     wait_for_message(
         &alice_ws.messages,
         "alice wallet settlement",
@@ -170,14 +239,15 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    wait_for_projected_fill(&pool, alice.userid, bob.userid).await?;
-    wait_for_candles(&pool).await?;
-    wait_for_candle_api(&client, &settings.server_url).await?;
-    wait_for_filled_orders(&pool, alice.userid, bob.userid).await?;
+    wait_for_projected_fill(&pool, PRIMARY_MARKET, alice.userid, bob.userid).await?;
+    wait_for_candles(&pool, PRIMARY_MARKET).await?;
+    wait_for_candle_api(&client, &settings.server_url, PRIMARY_MARKET).await?;
+    wait_for_filled_orders(&pool, PRIMARY_MARKET, alice.userid, bob.userid).await?;
     wait_for_open_position_api(
         &client,
         &settings.server_url,
         &alice.jwt_token,
+        PRIMARY_MARKET,
         alice.userid,
         "LONG",
     )
@@ -186,6 +256,7 @@ async fn main() -> Result<()> {
         &client,
         &settings.server_url,
         &bob.jwt_token,
+        PRIMARY_MARKET,
         bob.userid,
         "SHORT",
     )
@@ -193,40 +264,116 @@ async fn main() -> Result<()> {
     wait_for_unlocked_balances(&pool, alice.userid, bob.userid).await?;
     wait_for_ledger_entries(&pool, alice.userid, bob.userid).await?;
 
+    place_limit_order(
+        &client,
+        &settings.server_url,
+        &erin,
+        &format!("order-erin-secondary-fill-{run_id}"),
+        SECONDARY_MARKET,
+        "SHORT",
+    )
+    .await?;
+
+    wait_for_message(&dave_ws.messages, "dave account trade", is_account_trade).await?;
+    wait_for_message(&erin_ws.messages, "erin account trade", is_account_trade).await?;
+    wait_for_message(&dave_ws.messages, "dave secondary market trade", |value| {
+        is_market_trade(value, SECONDARY_MARKET)
+    })
+    .await?;
+    wait_for_message(&erin_ws.messages, "erin secondary market trade", |value| {
+        is_market_trade(value, SECONDARY_MARKET)
+    })
+    .await?;
+    wait_for_message(
+        &dave_ws.messages,
+        "dave secondary market orderbook clear",
+        |value| is_market_orderbook_clear(value, SECONDARY_MARKET),
+    )
+    .await?;
+    wait_for_empty_orderbook_snapshot(&client, &settings.server_url, SECONDARY_MARKET).await?;
+    wait_for_message(
+        &dave_ws.messages,
+        "dave wallet settlement",
+        is_wallet_settlement,
+    )
+    .await?;
+    wait_for_message(
+        &erin_ws.messages,
+        "erin wallet settlement",
+        is_wallet_settlement,
+    )
+    .await?;
+
+    wait_for_projected_fill(&pool, SECONDARY_MARKET, dave.userid, erin.userid).await?;
+    wait_for_candles(&pool, SECONDARY_MARKET).await?;
+    wait_for_candle_api(&client, &settings.server_url, SECONDARY_MARKET).await?;
+    wait_for_filled_orders(&pool, SECONDARY_MARKET, dave.userid, erin.userid).await?;
+    wait_for_open_position_api(
+        &client,
+        &settings.server_url,
+        &dave.jwt_token,
+        SECONDARY_MARKET,
+        dave.userid,
+        "LONG",
+    )
+    .await?;
+    wait_for_open_position_api(
+        &client,
+        &settings.server_url,
+        &erin.jwt_token,
+        SECONDARY_MARKET,
+        erin.userid,
+        "SHORT",
+    )
+    .await?;
+    wait_for_unlocked_balances(&pool, dave.userid, erin.userid).await?;
+    wait_for_ledger_entries(&pool, dave.userid, erin.userid).await?;
+    assert_market_events_only(
+        &alice_ws.messages,
+        "alice primary websocket",
+        &[PRIMARY_MARKET.id],
+    )
+    .await?;
+    assert_market_events_only(
+        &bob_ws.messages,
+        "bob primary websocket",
+        &[PRIMARY_MARKET.id],
+    )
+    .await?;
+    assert_market_events_only(
+        &dave_ws.messages,
+        "dave secondary websocket",
+        &[SECONDARY_MARKET.id],
+    )
+    .await?;
+    assert_market_events_only(
+        &erin_ws.messages,
+        "erin secondary websocket",
+        &[SECONDARY_MARKET.id],
+    )
+    .await?;
+
     let charlie = signup(&client, &settings.server_url, &format!("charlie-{run_id}")).await?;
     println!(
         "created smoke liquidity user {}={}",
         charlie.username, charlie.userid
     );
-    command(
+    deposit_usdc(
         &client,
         &settings.server_url,
-        &charlie.jwt_token,
+        &charlie,
         &format!("deposit-charlie-{run_id}"),
-        "/balance/",
-        json!({"asset":"USDC","amount":10000,"reference_id":format!("deposit-charlie-{run_id}")}),
     )
-    .await
-    .context("charlie deposit failed")?;
-    command(
+    .await?;
+    place_limit_order(
         &client,
         &settings.server_url,
-        &charlie.jwt_token,
+        &charlie,
         &format!("order-charlie-close-liquidity-{run_id}"),
-        "/orders/",
-        json!({
-            "market_id": MARKET_ID,
-            "market_name": MARKET_NAME,
-            "side": "LONG",
-            "order_type": "LIMIT",
-            "quantity": 10,
-            "price": 100,
-            "margin": 1000,
-            "margin_asset": "USDC"
-        }),
+        PRIMARY_MARKET,
+        "LONG",
     )
-    .await
-    .context("charlie close-liquidity order failed")?;
+    .await?;
     command(
         &client,
         &settings.server_url,
@@ -234,22 +381,41 @@ async fn main() -> Result<()> {
         &format!("close-alice-{run_id}"),
         "/positions/close",
         json!({
-            "market_id": MARKET_ID,
+            "market_id": PRIMARY_MARKET.id,
             "price": 0
         }),
     )
     .await
     .context("alice close position failed")?;
 
-    wait_for_no_open_position_api(&client, &settings.server_url, &alice.jwt_token).await?;
+    wait_for_no_open_position_api(
+        &client,
+        &settings.server_url,
+        &alice.jwt_token,
+        PRIMARY_MARKET,
+    )
+    .await?;
     wait_for_closed_position_api(
         &client,
         &settings.server_url,
         &alice.jwt_token,
+        PRIMARY_MARKET,
         alice.userid,
     )
     .await?;
-    wait_for_reduce_only_close_order(&pool, alice.userid).await?;
+    wait_for_reduce_only_close_order(&pool, PRIMARY_MARKET, alice.userid).await?;
+    assert_market_events_only(
+        &dave_ws.messages,
+        "dave secondary websocket",
+        &[SECONDARY_MARKET.id],
+    )
+    .await?;
+    assert_market_events_only(
+        &erin_ws.messages,
+        "erin secondary websocket",
+        &[SECONDARY_MARKET.id],
+    )
+    .await?;
 
     println!("e2e smoke passed");
     Ok(())
@@ -269,8 +435,8 @@ impl Settings {
     }
 }
 
-async fn wait_for_server(client: &Client, server_url: &str) -> Result<()> {
-    let url = format!("{server_url}/orders/open/{MARKET_ID}");
+async fn wait_for_server(client: &Client, server_url: &str, market: MarketSpec) -> Result<()> {
+    let url = format!("{server_url}/orders/open/{}", market.id);
     let deadline = Instant::now() + Duration::from_secs(60);
 
     loop {
@@ -292,7 +458,7 @@ async fn wait_for_server(client: &Client, server_url: &str) -> Result<()> {
     }
 }
 
-async fn upsert_market(pool: &Pool<Postgres>) -> Result<()> {
+async fn upsert_market(pool: &Pool<Postgres>, market: MarketSpec) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO markets(
@@ -304,7 +470,7 @@ async fn upsert_market(pool: &Pool<Postgres>) -> Result<()> {
             decimal_quote,
             last_traded_price
         )
-        VALUES($1,$2,'SOL','USDC',9,6,0)
+        VALUES($1,$2,$3::asset_type,'USDC'::asset_type,9,6,0)
         ON CONFLICT(market_id)
         DO UPDATE
         SET market_name=EXCLUDED.market_name,
@@ -314,11 +480,12 @@ async fn upsert_market(pool: &Pool<Postgres>) -> Result<()> {
             decimal_quote=EXCLUDED.decimal_quote
         "#,
     )
-    .bind(MARKET_ID)
-    .bind(MARKET_NAME)
+    .bind(market.id)
+    .bind(market.name)
+    .bind(market.base_asset)
     .execute(pool)
     .await
-    .context("failed to upsert smoke market")?;
+    .with_context(|| format!("failed to upsert smoke market {}", market.name))?;
 
     Ok(())
 }
@@ -343,6 +510,57 @@ async fn signup(client: &Client, server_url: &str, username: &str) -> Result<Use
     payload
         .body
         .ok_or_else(|| anyhow!("signup response missing body for {username}"))
+}
+
+async fn deposit_usdc(
+    client: &Client,
+    server_url: &str,
+    user: &UserRecord,
+    idempotency_key: &str,
+) -> Result<()> {
+    command(
+        client,
+        server_url,
+        &user.jwt_token,
+        idempotency_key,
+        "/balance/",
+        json!({"asset":"USDC","amount":10000,"reference_id":idempotency_key}),
+    )
+    .await
+    .with_context(|| format!("{} deposit failed", user.username))?;
+
+    Ok(())
+}
+
+async fn place_limit_order(
+    client: &Client,
+    server_url: &str,
+    user: &UserRecord,
+    idempotency_key: &str,
+    market: MarketSpec,
+    side: &str,
+) -> Result<()> {
+    command(
+        client,
+        server_url,
+        &user.jwt_token,
+        idempotency_key,
+        "/orders/",
+        json!({
+            "market_id": market.id,
+            "market_name": market.name,
+            "side": side,
+            "order_type": "LIMIT",
+            "quantity": market.quantity,
+            "price": market.price,
+            "margin": market.margin,
+            "margin_asset": "USDC"
+        }),
+    )
+    .await
+    .with_context(|| format!("{} {side} order failed on {}", user.username, market.name))?;
+
+    Ok(())
 }
 
 async fn command(
@@ -485,11 +703,11 @@ async fn connect_ws(ws_url: &str, token: &str) -> Result<WsClient> {
     }
 }
 
-async fn subscribe_market(client: &mut WsClient) -> Result<()> {
+async fn subscribe_market(client: &mut WsClient, market: MarketSpec) -> Result<()> {
     client
         .write
         .send(Message::Text(
-            json!({"type":"Subscribe","payload":{"markets":[MARKET_ID]}})
+            json!({"type":"Subscribe","payload":{"markets":[market.id]}})
                 .to_string()
                 .into(),
         ))
@@ -535,44 +753,70 @@ fn is_account_trade(value: &Value) -> bool {
         && has_engine_sequence(value)
 }
 
-fn is_market_trade(value: &Value) -> bool {
+fn is_market_trade(value: &Value, market: MarketSpec) -> bool {
     value.get("type").and_then(Value::as_str) == Some("MarketEvent")
         && value.pointer("/payload/source").and_then(Value::as_str) == Some("engine")
-        && value.pointer("/payload/market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+        && value.pointer("/payload/market_id").and_then(Value::as_i64) == Some(market.id)
         && value.pointer("/payload/event/type").and_then(Value::as_str) == Some("TradeExecuted")
         && has_engine_sequence(value)
 }
 
-fn is_market_orderbook_bid(value: &Value) -> bool {
-    is_market_orderbook_delta(value)
+fn is_market_orderbook_bid(value: &Value, market: MarketSpec) -> bool {
+    is_market_orderbook_delta(value, market)
         && value
             .pointer("/payload/event/payload/bids/0/price")
             .and_then(Value::as_i64)
-            == Some(100)
+            == Some(market.price)
         && value
             .pointer("/payload/event/payload/bids/0/quantity")
             .and_then(Value::as_i64)
-            == Some(10)
+            == Some(market.quantity)
 }
 
-fn is_market_orderbook_clear(value: &Value) -> bool {
-    is_market_orderbook_delta(value)
+fn is_market_orderbook_clear(value: &Value, market: MarketSpec) -> bool {
+    is_market_orderbook_delta(value, market)
         && value
             .pointer("/payload/event/payload/bids/0/price")
             .and_then(Value::as_i64)
-            == Some(100)
+            == Some(market.price)
         && value
             .pointer("/payload/event/payload/bids/0/quantity")
             .and_then(Value::as_i64)
             == Some(0)
 }
 
-fn is_market_orderbook_delta(value: &Value) -> bool {
+fn is_market_orderbook_delta(value: &Value, market: MarketSpec) -> bool {
     value.get("type").and_then(Value::as_str) == Some("MarketEvent")
         && value.pointer("/payload/source").and_then(Value::as_str) == Some("engine")
-        && value.pointer("/payload/market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+        && value.pointer("/payload/market_id").and_then(Value::as_i64) == Some(market.id)
         && value.pointer("/payload/event/type").and_then(Value::as_str) == Some("OrderBookDelta")
         && has_engine_sequence(value)
+}
+
+async fn assert_market_events_only(
+    messages: &std::sync::Arc<Mutex<Vec<Value>>>,
+    label: &str,
+    allowed_market_ids: &[i64],
+) -> Result<()> {
+    sleep(Duration::from_millis(500)).await;
+
+    let allowed_market_ids = allowed_market_ids.iter().copied().collect::<BTreeSet<_>>();
+    let messages = messages.lock().await;
+    if let Some((market_id, message)) = messages.iter().find_map(|message| {
+        market_event_market_id(message).and_then(|market_id| {
+            (!allowed_market_ids.contains(&market_id)).then_some((market_id, message))
+        })
+    }) {
+        bail!("{label} received market event for unexpected market {market_id}: {message}");
+    }
+
+    Ok(())
+}
+
+fn market_event_market_id(value: &Value) -> Option<i64> {
+    (value.get("type").and_then(Value::as_str) == Some("MarketEvent"))
+        .then(|| value.pointer("/payload/market_id").and_then(Value::as_i64))
+        .flatten()
 }
 
 fn has_engine_sequence(value: &Value) -> bool {
@@ -592,8 +836,13 @@ fn is_wallet_settlement(value: &Value) -> bool {
         && value.pointer("/payload/event/type").and_then(Value::as_str) == Some("TradeSettled")
 }
 
-async fn wait_for_projected_fill(pool: &Pool<Postgres>, alice: i64, bob: i64) -> Result<()> {
-    wait_for_db("projected fill", || async {
+async fn wait_for_projected_fill(
+    pool: &Pool<Postgres>,
+    market: MarketSpec,
+    maker: i64,
+    taker: i64,
+) -> Result<()> {
+    wait_for_db(&format!("projected fill on {}", market.name), || async {
         let count = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT COUNT(*)::BIGINT
@@ -604,9 +853,9 @@ async fn wait_for_projected_fill(pool: &Pool<Postgres>, alice: i64, bob: i64) ->
               AND executed_at IS NOT NULL
             "#,
         )
-        .bind(alice)
-        .bind(bob)
-        .bind(MARKET_ID)
+        .bind(maker)
+        .bind(taker)
+        .bind(market.id)
         .fetch_one(pool)
         .await?;
         Ok(count >= 1)
@@ -614,8 +863,8 @@ async fn wait_for_projected_fill(pool: &Pool<Postgres>, alice: i64, bob: i64) ->
     .await
 }
 
-async fn wait_for_candles(pool: &Pool<Postgres>) -> Result<()> {
-    wait_for_db("candles", || async {
+async fn wait_for_candles(pool: &Pool<Postgres>, market: MarketSpec) -> Result<()> {
+    wait_for_db(&format!("candles on {}", market.name), || async {
         let rows = sqlx::query(
             r#"
             SELECT
@@ -632,7 +881,7 @@ async fn wait_for_candles(pool: &Pool<Postgres>) -> Result<()> {
             WHERE market_id=$1
             "#,
         )
-        .bind(MARKET_ID)
+        .bind(market.id)
         .fetch_all(pool)
         .await?;
 
@@ -648,11 +897,11 @@ async fn wait_for_candles(pool: &Pool<Postgres>) -> Result<()> {
         Ok(rows.len() == expected.len()
             && intervals == expected
             && rows.iter().all(|row| {
-                row.get::<i64, _>("open") == 100
-                    && row.get::<i64, _>("high") == 100
-                    && row.get::<i64, _>("low") == 100
-                    && row.get::<i64, _>("close") == 100
-                    && row.get::<i64, _>("volume") == 10
+                row.get::<i64, _>("open") == market.price
+                    && row.get::<i64, _>("high") == market.price
+                    && row.get::<i64, _>("low") == market.price
+                    && row.get::<i64, _>("close") == market.price
+                    && row.get::<i64, _>("volume") == market.quantity
                     && row.get::<i64, _>("trade_count") == 1
                     && row.get::<i64, _>("first_engine_sequence") > 0
                     && row.get::<i64, _>("last_engine_sequence")
@@ -662,8 +911,11 @@ async fn wait_for_candles(pool: &Pool<Postgres>) -> Result<()> {
     .await
 }
 
-async fn wait_for_candle_api(client: &Client, server_url: &str) -> Result<()> {
-    let url = format!("{server_url}/markets/{MARKET_ID}/candles?interval=1m&limit=10");
+async fn wait_for_candle_api(client: &Client, server_url: &str, market: MarketSpec) -> Result<()> {
+    let url = format!(
+        "{server_url}/markets/{}/candles?interval=1m&limit=10",
+        market.id
+    );
     let deadline = Instant::now() + Duration::from_secs(30);
 
     loop {
@@ -683,7 +935,7 @@ async fn wait_for_candle_api(client: &Client, server_url: &str) -> Result<()> {
                     .body
                     .unwrap_or_default()
                     .iter()
-                    .any(is_expected_candle)
+                    .any(|value| is_expected_candle(value, market))
             {
                 return Ok(());
             }
@@ -697,8 +949,46 @@ async fn wait_for_candle_api(client: &Client, server_url: &str) -> Result<()> {
     }
 }
 
-async fn wait_for_orderbook_snapshot(client: &Client, server_url: &str) -> Result<()> {
-    let url = format!("{server_url}/markets/{MARKET_ID}/orderbook?depth=10");
+async fn wait_for_orderbook_snapshot(
+    client: &Client,
+    server_url: &str,
+    market: MarketSpec,
+) -> Result<()> {
+    wait_for_orderbook_snapshot_matching(client, server_url, market, |value| {
+        value.pointer("/bids/0/price").and_then(Value::as_i64) == Some(market.price)
+            && value.pointer("/bids/0/quantity").and_then(Value::as_i64) == Some(market.quantity)
+    })
+    .await
+}
+
+async fn wait_for_empty_orderbook_snapshot(
+    client: &Client,
+    server_url: &str,
+    market: MarketSpec,
+) -> Result<()> {
+    wait_for_orderbook_snapshot_matching(client, server_url, market, |value| {
+        value
+            .get("bids")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+            && value
+                .get("asks")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+    })
+    .await
+}
+
+async fn wait_for_orderbook_snapshot_matching<F>(
+    client: &Client,
+    server_url: &str,
+    market: MarketSpec,
+    predicate: F,
+) -> Result<()>
+where
+    F: Fn(&Value) -> bool,
+{
+    let url = format!("{server_url}/markets/{}/orderbook?depth=10", market.id);
     let deadline = Instant::now() + Duration::from_secs(30);
 
     loop {
@@ -714,10 +1004,9 @@ async fn wait_for_orderbook_snapshot(client: &Client, server_url: &str) -> Resul
                 .await
                 .context("orderbook api response was not valid JSON")?;
             if payload.success
-                && payload
-                    .body
-                    .as_ref()
-                    .is_some_and(is_expected_orderbook_snapshot)
+                && payload.body.as_ref().is_some_and(|value| {
+                    is_expected_orderbook_snapshot(value, market) && predicate(value)
+                })
             {
                 return Ok(());
             }
@@ -731,24 +1020,22 @@ async fn wait_for_orderbook_snapshot(client: &Client, server_url: &str) -> Resul
     }
 }
 
-fn is_expected_orderbook_snapshot(value: &Value) -> bool {
-    value.get("market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+fn is_expected_orderbook_snapshot(value: &Value, market: MarketSpec) -> bool {
+    value.get("market_id").and_then(Value::as_i64) == Some(market.id)
         && value
             .get("engine_sequence")
             .and_then(Value::as_i64)
             .is_some_and(|sequence| sequence > 0)
-        && value.pointer("/bids/0/price").and_then(Value::as_i64) == Some(100)
-        && value.pointer("/bids/0/quantity").and_then(Value::as_i64) == Some(10)
 }
 
-fn is_expected_candle(value: &Value) -> bool {
-    value.get("market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+fn is_expected_candle(value: &Value, market: MarketSpec) -> bool {
+    value.get("market_id").and_then(Value::as_i64) == Some(market.id)
         && value.get("interval").and_then(Value::as_str) == Some("1m")
-        && value.get("open").and_then(Value::as_i64) == Some(100)
-        && value.get("high").and_then(Value::as_i64) == Some(100)
-        && value.get("low").and_then(Value::as_i64) == Some(100)
-        && value.get("close").and_then(Value::as_i64) == Some(100)
-        && value.get("volume").and_then(Value::as_i64) == Some(10)
+        && value.get("open").and_then(Value::as_i64) == Some(market.price)
+        && value.get("high").and_then(Value::as_i64) == Some(market.price)
+        && value.get("low").and_then(Value::as_i64) == Some(market.price)
+        && value.get("close").and_then(Value::as_i64) == Some(market.price)
+        && value.get("volume").and_then(Value::as_i64) == Some(market.quantity)
         && value.get("trade_count").and_then(Value::as_i64) == Some(1)
         && value
             .get("first_engine_sequence")
@@ -760,10 +1047,11 @@ async fn wait_for_open_position_api(
     client: &Client,
     server_url: &str,
     token: &str,
+    market: MarketSpec,
     user_id: i64,
     side: &str,
 ) -> Result<()> {
-    let url = format!("{server_url}/positions/open/{MARKET_ID}");
+    let url = format!("{server_url}/positions/open/{}", market.id);
     let deadline = Instant::now() + Duration::from_secs(30);
 
     loop {
@@ -782,7 +1070,7 @@ async fn wait_for_open_position_api(
             if payload
                 .body
                 .as_ref()
-                .is_some_and(|position| is_expected_position(position, user_id, side))
+                .is_some_and(|position| is_expected_position(position, market, user_id, side))
             {
                 return Ok(());
             }
@@ -796,13 +1084,13 @@ async fn wait_for_open_position_api(
     }
 }
 
-fn is_expected_position(value: &Value, user_id: i64, side: &str) -> bool {
+fn is_expected_position(value: &Value, market: MarketSpec, user_id: i64, side: &str) -> bool {
     value.get("user_id").and_then(Value::as_i64) == Some(user_id)
-        && value.get("market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+        && value.get("market_id").and_then(Value::as_i64) == Some(market.id)
         && value.get("side").and_then(Value::as_str) == Some(side)
-        && value.get("quantity").and_then(Value::as_i64) == Some(10)
-        && value.get("average_price").and_then(Value::as_i64) == Some(100)
-        && value.get("initial_margin").and_then(Value::as_i64) == Some(1000)
+        && value.get("quantity").and_then(Value::as_i64) == Some(market.quantity)
+        && value.get("average_price").and_then(Value::as_i64) == Some(market.price)
+        && value.get("initial_margin").and_then(Value::as_i64) == Some(market.margin)
         && value.get("unrealized_pnl").and_then(Value::as_i64) == Some(0)
 }
 
@@ -810,8 +1098,9 @@ async fn wait_for_no_open_position_api(
     client: &Client,
     server_url: &str,
     token: &str,
+    market: MarketSpec,
 ) -> Result<()> {
-    let url = format!("{server_url}/positions/open/{MARKET_ID}");
+    let url = format!("{server_url}/positions/open/{}", market.id);
     let deadline = Instant::now() + Duration::from_secs(30);
 
     loop {
@@ -844,9 +1133,10 @@ async fn wait_for_closed_position_api(
     client: &Client,
     server_url: &str,
     token: &str,
+    market: MarketSpec,
     user_id: i64,
 ) -> Result<()> {
-    let url = format!("{server_url}/positions/closed/{MARKET_ID}");
+    let url = format!("{server_url}/positions/closed/{}", market.id);
     let deadline = Instant::now() + Duration::from_secs(30);
 
     loop {
@@ -867,7 +1157,7 @@ async fn wait_for_closed_position_api(
                     .body
                     .unwrap_or_default()
                     .iter()
-                    .any(|position| is_expected_closed_position(position, user_id))
+                    .any(|position| is_expected_closed_position(position, market, user_id))
             {
                 return Ok(());
             }
@@ -881,13 +1171,13 @@ async fn wait_for_closed_position_api(
     }
 }
 
-fn is_expected_closed_position(value: &Value, user_id: i64) -> bool {
+fn is_expected_closed_position(value: &Value, market: MarketSpec, user_id: i64) -> bool {
     value.get("user_id").and_then(Value::as_i64) == Some(user_id)
-        && value.get("market_id").and_then(Value::as_i64) == Some(MARKET_ID)
+        && value.get("market_id").and_then(Value::as_i64) == Some(market.id)
         && value.get("side").and_then(Value::as_str) == Some("LONG")
-        && value.get("quantity").and_then(Value::as_i64) == Some(10)
-        && value.get("entry_price").and_then(Value::as_i64) == Some(100)
-        && value.get("exit_price").and_then(Value::as_i64) == Some(100)
+        && value.get("quantity").and_then(Value::as_i64) == Some(market.quantity)
+        && value.get("entry_price").and_then(Value::as_i64) == Some(market.price)
+        && value.get("exit_price").and_then(Value::as_i64) == Some(market.price)
         && value.get("realized_pnl").and_then(Value::as_i64) == Some(0)
         && value
             .get("close_order_id")
@@ -895,8 +1185,13 @@ fn is_expected_closed_position(value: &Value, user_id: i64) -> bool {
             .is_some_and(|order_id| order_id > 0)
 }
 
-async fn wait_for_filled_orders(pool: &Pool<Postgres>, alice: i64, bob: i64) -> Result<()> {
-    wait_for_db("filled orders", || async {
+async fn wait_for_filled_orders(
+    pool: &Pool<Postgres>,
+    market: MarketSpec,
+    maker: i64,
+    taker: i64,
+) -> Result<()> {
+    wait_for_db(&format!("filled orders on {}", market.name), || async {
         let count = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT COUNT(*)::BIGINT
@@ -904,9 +1199,9 @@ async fn wait_for_filled_orders(pool: &Pool<Postgres>, alice: i64, bob: i64) -> 
             WHERE user_id IN ($1,$2) AND market_id=$3 AND status='FILLED'
             "#,
         )
-        .bind(alice)
-        .bind(bob)
-        .bind(MARKET_ID)
+        .bind(maker)
+        .bind(taker)
+        .bind(market.id)
         .fetch_one(pool)
         .await?;
         Ok(count == 2)
@@ -914,7 +1209,11 @@ async fn wait_for_filled_orders(pool: &Pool<Postgres>, alice: i64, bob: i64) -> 
     .await
 }
 
-async fn wait_for_reduce_only_close_order(pool: &Pool<Postgres>, user_id: i64) -> Result<()> {
+async fn wait_for_reduce_only_close_order(
+    pool: &Pool<Postgres>,
+    market: MarketSpec,
+    user_id: i64,
+) -> Result<()> {
     wait_for_db("reduce-only close order", || async {
         let count = sqlx::query_scalar::<_, i64>(
             r#"
@@ -929,7 +1228,7 @@ async fn wait_for_reduce_only_close_order(pool: &Pool<Postgres>, user_id: i64) -
             "#,
         )
         .bind(user_id)
-        .bind(MARKET_ID)
+        .bind(market.id)
         .fetch_one(pool)
         .await?;
         Ok(count >= 1)

@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!(
         "fake engine starting: consuming '{}' and observing '{}'",
-        settings.engine_commands_topic, settings.wallet_events_topic
+        settings.engine_input_topic, settings.wallet_events_topic
     );
 
     queue.run(engine).await?;

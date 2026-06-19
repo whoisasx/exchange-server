@@ -54,8 +54,44 @@ wait_until() {
 
 create_topic() {
   local topic="$1"
+  local partitions="$2"
+  shift 2
+
   docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda \
-    rpk topic create "$topic" --partitions 3 --brokers localhost:9092 >/dev/null 2>&1 || true
+    rpk topic create --if-not-exists --partitions "$partitions" --brokers localhost:9092 "$@" "$topic" >/dev/null
+}
+
+set_topic_config() {
+  local topic="$1"
+  local config="$2"
+
+  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda \
+    rpk topic alter-config "$topic" --set "$config" --brokers localhost:9092 >/dev/null
+}
+
+topic_partitions() {
+  local topic="$1"
+
+  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda \
+    rpk topic describe "$topic" --brokers localhost:9092 | awk '$1 == "PARTITIONS" { print $2; exit }'
+}
+
+assert_topic_partitions() {
+  local topic="$1"
+  local expected="$2"
+  local actual
+
+  actual="$(topic_partitions "$topic")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "topic $topic must have $expected partition(s), found ${actual:-unknown}" >&2
+    exit 1
+  fi
+}
+
+create_engine_input_topic() {
+  create_topic engine.input 1 -c retention.ms=1800000
+  set_topic_config engine.input retention.ms=1800000
+  assert_topic_partitions engine.input 1
 }
 
 start_service() {
@@ -75,6 +111,8 @@ start_service() {
       REDPANDA_BROKERS="127.0.0.1:${REDPANDA_PORT}" \
       SERVER_REPLY_PARTITION="0" \
       REQUEST_WAIT_TIMEOUT_MS="${E2E_REQUEST_WAIT_TIMEOUT_MS:-8000}" \
+      ORDERBOOK_ARCHIVE_LOCAL_ROOT="$LOG_DIR/orderbook-archive-objects" \
+      ORDERBOOK_ARCHIVER_OFFSET_LOCAL_ROOT="$LOG_DIR/orderbook-archiver-offsets" \
       "$ROOT_DIR/target/debug/$binary"
   ) >"$log_file" 2>&1 &
 
@@ -93,20 +131,25 @@ wait_until postgres docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T
 wait_until redpanda docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda rpk cluster info --brokers localhost:9092
 
 echo "creating redpanda topics"
-for topic in wallet.commands wallet.replies wallet.events engine.commands engine.replies engine.events; do
-  create_topic "$topic"
+for topic in wallet.commands wallet.replies wallet.events engine.input engine.replies engine.events; do
+  if [[ "$topic" == "engine.input" ]]; then
+    create_engine_input_topic
+  else
+    create_topic "$topic" 3
+  fi
 done
 
 echo "building e2e binaries"
 (
   cd "$ROOT_DIR"
-  cargo build -p wallet -p projector -p timeseries -p fake-engine -p ws -p ledger -p server -p e2e-smoke
+  cargo build -p wallet -p projector -p timeseries -p orderbook-archiver -p fake-engine -p ws -p ledger -p server -p e2e-smoke
 )
 
 echo "starting exchange services"
 start_service wallet
 start_service projector
 start_service timeseries
+start_service orderbook-archiver
 start_service ledger
 start_service fake-engine
 start_service ws

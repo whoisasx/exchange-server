@@ -268,6 +268,8 @@ mod tests {
         state
             .resolve_engine_reply(EngineReply::OrderAccepted(OrderAccepted {
                 request_id: String::from("req-1"),
+                source_input_id: None,
+                source_input_offset: None,
                 order_id: 99,
                 reservation_id: String::from("res-1"),
             }))

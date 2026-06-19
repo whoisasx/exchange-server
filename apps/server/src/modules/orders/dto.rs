@@ -1,6 +1,8 @@
 use db::dto::{AssetType, OrderRow, OrderType, SideType};
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_LEVERAGE: i64 = 1;
+
 #[derive(Deserialize)]
 #[allow(dead_code)]
 pub struct PlaceOrder {
@@ -13,6 +15,8 @@ pub struct PlaceOrder {
     pub margin: i64,
     #[serde(default = "default_margin_asset")]
     pub margin_asset: AssetType,
+    #[serde(default = "default_leverage")]
+    pub leverage: i64,
 }
 
 #[derive(Deserialize)]
@@ -24,6 +28,10 @@ pub struct CancelOrder {
 
 fn default_margin_asset() -> AssetType {
     AssetType::USDC
+}
+
+fn default_leverage() -> i64 {
+    DEFAULT_LEVERAGE
 }
 
 #[derive(Serialize)]
@@ -52,6 +60,7 @@ impl From<OrderRow> for PublicOpenOrder {
 #[cfg(test)]
 mod tests {
     use db::dto::OrderStatus;
+    use serde_json::json;
 
     use super::*;
 
@@ -80,5 +89,22 @@ mod tests {
         assert_eq!(public.order_type, OrderType::LIMIT);
         assert_eq!(public.quantity, 10);
         assert_eq!(public.price, 100);
+    }
+
+    #[test]
+    fn place_order_defaults_leverage_for_legacy_requests() {
+        let order: PlaceOrder = serde_json::from_value(json!({
+            "market_id": 1,
+            "market_name": "SOL-PERP",
+            "side": "LONG",
+            "order_type": "LIMIT",
+            "quantity": 10,
+            "price": 100,
+            "margin": 1000
+        }))
+        .expect("legacy order request should deserialize");
+
+        assert_eq!(order.leverage, DEFAULT_LEVERAGE);
+        assert_eq!(order.margin_asset, AssetType::USDC);
     }
 }

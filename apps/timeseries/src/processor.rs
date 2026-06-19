@@ -76,6 +76,7 @@ pub fn bucket_start_ms(timestamp_ms: i64, interval_ms: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use protocol::common::Side;
     use protocol::engine::{ExecutionReason, TradeExecuted};
 
     use super::*;
@@ -89,22 +90,7 @@ mod tests {
 
     #[test]
     fn candle_drafts_include_core_intervals() {
-        let trade = TradeExecuted {
-            engine_sequence: 12,
-            engine_timestamp_ms: 1710000123456,
-            fill_id: 1,
-            market_id: 7,
-            price: 100,
-            quantity: 5,
-            maker_order_id: 10,
-            taker_order_id: 11,
-            maker_user_id: 42,
-            taker_user_id: 43,
-            maker_reservation_id: None,
-            taker_reservation_id: None,
-            execution_reason: ExecutionReason::TRADE,
-            settlements: Vec::new(),
-        };
+        let trade = trade(ExecutionReason::TRADE);
 
         let drafts = candle_drafts_from_trade(&trade);
         let intervals = drafts
@@ -115,5 +101,45 @@ mod tests {
         assert_eq!(intervals, vec!["1m", "5m", "15m", "1h", "1d"]);
         assert!(drafts.iter().all(|draft| draft.market_id == 7));
         assert!(drafts.iter().all(|draft| draft.engine_sequence == 12));
+    }
+
+    #[test]
+    fn liquidation_trades_are_candle_sources() {
+        let trade = trade(ExecutionReason::LIQUIDATION);
+
+        let drafts = candle_drafts_from_trade(&trade);
+
+        assert_eq!(drafts.len(), CANDLE_INTERVALS.len());
+        assert!(drafts.iter().all(|draft| draft.price == trade.price));
+        assert!(drafts.iter().all(|draft| draft.quantity == trade.quantity));
+    }
+
+    fn trade(execution_reason: ExecutionReason) -> TradeExecuted {
+        let is_liquidation = execution_reason == ExecutionReason::LIQUIDATION;
+
+        TradeExecuted {
+            engine_event_id: None,
+            engine_sequence: 12,
+            engine_timestamp_ms: 1710000123456,
+            source_input_id: None,
+            source_input_offset: None,
+            fill_id: 1,
+            market_id: 7,
+            price: 100,
+            quantity: 5,
+            maker_order_id: 10,
+            taker_order_id: 11,
+            maker_user_id: 42,
+            taker_user_id: 43,
+            maker_reservation_id: None,
+            taker_reservation_id: None,
+            execution_reason,
+            liquidation_id: is_liquidation.then(|| String::from("liq-1")),
+            liquidated_user_id: is_liquidation.then_some(42),
+            position_side: is_liquidation.then_some(Side::LONG),
+            liquidation_fee: None,
+            fee_deltas: Vec::new(),
+            settlements: Vec::new(),
+        }
     }
 }

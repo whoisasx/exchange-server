@@ -1,8 +1,0 @@
-{
-  "type": "LiquidationRejected",
-  "payload": {
-    "request_id": "req_liq_002",
-    "liquidation_id": "liq_002",
-    "reason": "position is not liquidatable"
-  }
-}

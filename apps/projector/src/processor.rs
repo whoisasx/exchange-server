@@ -1,5 +1,5 @@
 use protocol::{
-    engine::{EngineCommand, EngineEvent, EngineReply},
+    engine::{EngineEvent, EngineInput, EngineReply},
     wallet::WalletEvent,
 };
 
@@ -15,25 +15,28 @@ impl ProjectorProcessor {
         Self { repository }
     }
 
-    pub async fn process_engine_command(
+    pub async fn process_engine_input(
         &self,
-        command: EngineCommand,
+        input: EngineInput,
         topic: &str,
         partition: i32,
         next_offset: i64,
     ) -> Result<(), ProjectorRepositoryError> {
-        match command {
-            EngineCommand::PlaceOrder(order) => {
+        match input {
+            EngineInput::PlaceOrder(order) => {
                 self.repository
                     .save_order_context(&order, topic, partition, next_offset)
                     .await
             }
-            EngineCommand::LiquidatePosition(liquidation) => {
+            EngineInput::LiquidatePosition(liquidation) => {
                 self.repository
                     .save_liquidation_context(&liquidation, topic, partition, next_offset)
                     .await
             }
-            EngineCommand::CancelOrder(_) => {
+            EngineInput::CancelOrder(_)
+            | EngineInput::MarkPriceUpdated(_)
+            | EngineInput::FundingRateUpdated(_)
+            | EngineInput::FundingSettlementTick(_) => {
                 self.repository
                     .save_queue_offset(topic, partition, next_offset)
                     .await
@@ -103,6 +106,25 @@ impl ProjectorProcessor {
             EngineEvent::OrderBookDelta(event) => {
                 self.repository
                     .project_orderbook_delta(&event, topic, partition, next_offset)
+                    .await
+            }
+            event @ (EngineEvent::OrderExpired(_)
+            | EngineEvent::ReservationReleased(_)
+            | EngineEvent::MarkPriceUpdated(_)
+            | EngineEvent::FundingRateUpdated(_)
+            | EngineEvent::FundingPaymentApplied(_)
+            | EngineEvent::PositionChanged(_)
+            | EngineEvent::RiskStateUpdated(_)
+            | EngineEvent::FeeCharged(_)
+            | EngineEvent::LiquidationStarted(_)
+            | EngineEvent::LiquidationExecuted(_)
+            | EngineEvent::LiquidationCompleted(_)
+            | EngineEvent::AdlExecuted(_)
+            | EngineEvent::AccountDelta(_)
+            | EngineEvent::OrderBookSnapshotCreated(_)
+            | EngineEvent::EngineCheckpointCommitted(_)) => {
+                self.repository
+                    .project_engine_event_log(&event, topic, partition, next_offset)
                     .await
             }
         }

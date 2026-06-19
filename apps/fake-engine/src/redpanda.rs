@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, error::Error, fmt, ops::Range, sync::Arc, time::Duration};
 
 use chrono::Utc;
-use protocol::{engine::EngineCommand, wallet::WalletEvent};
+use protocol::{engine::EngineInput, wallet::WalletEvent};
 use rskafka::{
     client::{
         Client, ClientBuilder,
@@ -29,8 +29,8 @@ const IDLE_SLEEP: Duration = Duration::from_millis(100);
 const PRODUCER_BATCH_BYTES: usize = 1024 * 1024;
 
 pub struct FakeEngineQueue {
-    engine_commands_topic: String,
-    command_partitions: Vec<Arc<PartitionClient>>,
+    engine_input_topic: String,
+    input_partitions: Vec<Arc<PartitionClient>>,
     wallet_events_topic: String,
     wallet_event_partitions: Vec<Arc<PartitionClient>>,
     publishers: EnginePublishers,
@@ -45,8 +45,8 @@ impl FakeEngineQueue {
             .await?;
         let topics = client.list_topics().await?;
 
-        let command_partitions =
-            partition_clients(&client, &topics, &settings.engine_commands_topic).await?;
+        let input_partitions =
+            partition_clients(&client, &topics, &settings.engine_input_topic).await?;
         let wallet_event_partitions =
             partition_clients(&client, &topics, &settings.wallet_events_topic).await?;
         let publishers = EnginePublishers {
@@ -65,8 +65,8 @@ impl FakeEngineQueue {
         };
 
         Ok(Self {
-            engine_commands_topic: settings.engine_commands_topic.clone(),
-            command_partitions,
+            engine_input_topic: settings.engine_input_topic.clone(),
+            input_partitions,
             wallet_events_topic: settings.wallet_events_topic.clone(),
             wallet_event_partitions,
             publishers,
@@ -85,13 +85,13 @@ impl FakeEngineQueue {
             });
         }
 
-        for partition_client in self.command_partitions {
-            let topic = self.engine_commands_topic.clone();
+        for partition_client in self.input_partitions {
+            let topic = self.engine_input_topic.clone();
             let engine = engine.clone();
             let publishers = self.publishers.clone();
 
             tasks.spawn(async move {
-                run_command_partition(topic, partition_client, engine, publishers).await
+                run_input_partition(topic, partition_client, engine, publishers).await
             });
         }
 
@@ -146,7 +146,7 @@ async fn run_wallet_event_partition(
     }
 }
 
-async fn run_command_partition(
+async fn run_input_partition(
     topic: String,
     partition_client: Arc<PartitionClient>,
     engine: FakeEngine,
@@ -175,13 +175,13 @@ async fn run_command_partition(
                 continue;
             };
 
-            match serde_json::from_slice::<EngineCommand>(&payload) {
-                Ok(command) => {
-                    let output = engine.process_command(command);
+            match serde_json::from_slice::<EngineInput>(&payload) {
+                Ok(input) => {
+                    let output = engine.process_input(input, Some(record.offset));
                     publishers.publish_output(output).await?;
                 }
                 Err(error) => eprintln!(
-                    "invalid engine command on {topic}[{partition}]@{}: {error}",
+                    "invalid engine input on {topic}[{partition}]@{}: {error}",
                     record.offset
                 ),
             }

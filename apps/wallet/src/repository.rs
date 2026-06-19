@@ -32,12 +32,23 @@ pub struct ReservationRecord {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountDeltaUpdate {
+    pub user_id: i64,
+    pub asset: Asset,
+    pub total_delta: i64,
+    pub locked_delta: i64,
+    pub kind: String,
+    pub reference_id: String,
+}
+
 #[derive(Debug)]
 pub enum WalletRepositoryError {
     InsufficientFunds { available: i64 },
     IdempotencyConflict,
     ReservationNotFound,
     InvalidReservationState,
+    InvalidAccountDelta,
     Storage(sqlx::Error),
     Serialization(serde_json::Error),
 }
@@ -424,6 +435,73 @@ impl WalletRepository {
         tx.commit().await?;
 
         reservation_from_row(row)
+    }
+
+    pub async fn apply_account_delta(
+        &self,
+        delta: &AccountDeltaUpdate,
+    ) -> Result<bool, WalletRepositoryError> {
+        if delta.total_delta == 0 && delta.locked_delta == 0 {
+            return Ok(false);
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let db_asset = asset_to_db(delta.asset);
+
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO wallet_ledger(user_id, asset, amount, kind, reference_id)
+            VALUES($1,$2,$3,$4,$5)
+            ON CONFLICT(user_id, asset, kind, reference_id)
+            DO NOTHING
+            RETURNING ledger_id
+            "#,
+        )
+        .bind(delta.user_id)
+        .bind(db_asset)
+        .bind(delta.total_delta)
+        .bind(&delta.kind)
+        .bind(&delta.reference_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if inserted.is_none() {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        let balance = sqlx::query(
+            r#"
+            INSERT INTO user_collaterals(user_id, asset, total, locked)
+            SELECT $1,$2,$3,$4
+            WHERE $3 >= 0 AND $4 >= 0 AND $4 <= $3
+            ON CONFLICT(user_id, asset)
+            DO UPDATE
+            SET total=user_collaterals.total+EXCLUDED.total,
+                locked=user_collaterals.locked+EXCLUDED.locked,
+                updated_at=NOW()
+            WHERE user_collaterals.total+EXCLUDED.total >= 0
+              AND user_collaterals.locked+EXCLUDED.locked >= 0
+              AND user_collaterals.locked+EXCLUDED.locked
+                    <= user_collaterals.total+EXCLUDED.total
+            RETURNING total, locked
+            "#,
+        )
+        .bind(delta.user_id)
+        .bind(db_asset)
+        .bind(delta.total_delta)
+        .bind(delta.locked_delta)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if balance.is_none() {
+            tx.rollback().await?;
+            return Err(WalletRepositoryError::InvalidAccountDelta);
+        }
+
+        tx.commit().await?;
+
+        Ok(true)
     }
 
     pub async fn load_queue_offset(

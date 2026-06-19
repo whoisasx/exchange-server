@@ -1,7 +1,7 @@
 use std::{error::Error, fmt};
 
 use protocol::{
-    engine::{EngineCommand, EngineEvent, EngineReply},
+    engine::{EngineEvent, EngineInput, EngineReply},
     wallet::WalletEvent,
 };
 
@@ -69,15 +69,15 @@ impl ProjectorWorker {
         &self.settings
     }
 
-    pub async fn process_engine_command(
+    pub async fn process_engine_input(
         &self,
-        command: EngineCommand,
+        input: EngineInput,
         topic: &str,
         partition: i32,
         next_offset: i64,
     ) -> Result<(), ProjectorError> {
         self.processor
-            .process_engine_command(command, topic, partition, next_offset)
+            .process_engine_input(input, topic, partition, next_offset)
             .await
             .map_err(projector_error)
     }
@@ -148,7 +148,7 @@ impl ProjectorWorker {
         println!(
             "projector starting: group '{}' consuming '{}', '{}', '{}', and '{}'",
             self.settings.consumer_group,
-            self.settings.engine_commands_topic,
+            self.settings.engine_input_topic,
             self.settings.engine_replies_topic,
             self.settings.engine_events_topic,
             self.settings.wallet_events_topic

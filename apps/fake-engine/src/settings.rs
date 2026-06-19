@@ -5,7 +5,7 @@ use protocol::{engine, wallet};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FakeEngineSettings {
     pub redpanda_brokers: String,
-    pub engine_commands_topic: String,
+    pub engine_input_topic: String,
     pub engine_replies_topic: String,
     pub engine_events_topic: String,
     pub wallet_events_topic: String,
@@ -17,10 +17,7 @@ impl FakeEngineSettings {
     pub fn from_env() -> Self {
         Self {
             redpanda_brokers: env_or_default("REDPANDA_BROKERS", "localhost:9092"),
-            engine_commands_topic: env_or_default(
-                "ENGINE_COMMANDS_TOPIC",
-                engine::ENGINE_COMMANDS_TOPIC,
-            ),
+            engine_input_topic: engine_input_topic_from_env(),
             engine_replies_topic: env_or_default(
                 "ENGINE_REPLIES_TOPIC",
                 engine::ENGINE_REPLIES_TOPIC,
@@ -31,6 +28,12 @@ impl FakeEngineSettings {
             fill_id_start: env_i64_or_default("FAKE_ENGINE_FILL_ID_START", 2_000_000),
         }
     }
+}
+
+fn engine_input_topic_from_env() -> String {
+    env::var("ENGINE_INPUT_TOPIC")
+        .or_else(|_| env::var("ENGINE_COMMANDS_TOPIC"))
+        .unwrap_or_else(|_| String::from(engine::ENGINE_INPUT_TOPIC))
 }
 
 fn env_or_default(key: &str, default: &str) -> String {

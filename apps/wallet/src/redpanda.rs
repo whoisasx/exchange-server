@@ -2,7 +2,9 @@ use std::{collections::BTreeMap, fmt, ops::Range, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use protocol::{
-    engine::{EngineCommand, EngineEvent},
+    engine::{
+        EngineEvent, FundingRateUpdatedInput, FundingSettlementTickInput, MarkPriceUpdatedInput,
+    },
     wallet::{ReleaseReservation, SettleTrade, WalletCommand},
 };
 use rskafka::{
@@ -21,12 +23,67 @@ use rskafka::{
 use serde::Serialize;
 use tokio::task::JoinSet;
 
-use crate::{settings::WalletSettings, worker::WalletWorker};
+use crate::{
+    engine_inputs::EngineInputPublication,
+    processor::{ApplyAccountDelta, EngineWalletCommand},
+    settings::WalletSettings,
+    worker::WalletWorker,
+};
 
 const FETCH_BYTES: Range<i32> = 1..52_428_800;
 const FETCH_MAX_WAIT_MS: i32 = 500;
 const IDLE_SLEEP: Duration = Duration::from_millis(100);
 const PRODUCER_BATCH_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone)]
+pub struct WalletEngineInputPublisher {
+    engine_inputs: TopicProducer,
+}
+
+impl WalletEngineInputPublisher {
+    pub async fn new(settings: &WalletSettings) -> Result<Self, QueueError> {
+        let brokers = parse_brokers(&settings.redpanda_brokers)?;
+        let client = ClientBuilder::new(brokers)
+            .client_id("exchange-wallet-engine-input-publisher")
+            .build()
+            .await?;
+        let topics = client.list_topics().await?;
+        let engine_inputs =
+            TopicProducer::new(&client, &topics, settings.engine_commands_topic.clone()).await?;
+
+        Ok(Self { engine_inputs })
+    }
+
+    pub async fn publish_mark_price_updated(
+        &self,
+        input: MarkPriceUpdatedInput,
+    ) -> Result<(), QueueError> {
+        self.publish(EngineInputPublication::mark_price_updated(input))
+            .await
+    }
+
+    pub async fn publish_funding_rate_updated(
+        &self,
+        input: FundingRateUpdatedInput,
+    ) -> Result<(), QueueError> {
+        self.publish(EngineInputPublication::funding_rate_updated(input))
+            .await
+    }
+
+    pub async fn publish_funding_settlement_tick(
+        &self,
+        input: FundingSettlementTickInput,
+    ) -> Result<(), QueueError> {
+        self.publish(EngineInputPublication::funding_settlement_tick(input))
+            .await
+    }
+
+    pub async fn publish(&self, publication: EngineInputPublication) -> Result<(), QueueError> {
+        self.engine_inputs
+            .publish_json(publication.key(), publication.input())
+            .await
+    }
+}
 
 pub struct WalletQueue {
     wallet_commands_topic: String,
@@ -227,9 +284,9 @@ async fn run_engine_event_partition(
                 }
             };
 
-            for command in wallet_commands_from_engine_event(event) {
-                let metadata = CommandMetadata::from_command(&command);
-                let result = worker.process_command(command).await?;
+            for command in engine_wallet_commands_from_engine_event(event) {
+                let metadata = CommandMetadata::from_engine_wallet_command(&command);
+                let result = worker.process_engine_command(command).await?;
                 publishers.publish_result(metadata, result).await?;
             }
 
@@ -270,8 +327,9 @@ impl WalletPublishers {
         }
 
         for command in result.engine_commands {
+            let publication = EngineInputPublication::new(command);
             self.engine_commands
-                .publish_json(&engine_command_key(&command), &command)
+                .publish_json(publication.key(), publication.input())
                 .await?;
         }
 
@@ -400,6 +458,26 @@ impl CommandMetadata {
             },
         }
     }
+
+    fn from_engine_wallet_command(command: &EngineWalletCommand) -> Self {
+        match command {
+            EngineWalletCommand::ReleaseReservation(command) => Self {
+                wallet_key: command.reservation_id.clone(),
+                reply_key: command.reservation_id.clone(),
+                reply_partition: None,
+            },
+            EngineWalletCommand::SettleTrade(command) => Self {
+                wallet_key: command.reservation_id.clone(),
+                reply_key: command.fill_id.to_string(),
+                reply_partition: None,
+            },
+            EngineWalletCommand::ApplyAccountDelta(command) => Self {
+                wallet_key: command.user_id.to_string(),
+                reply_key: command.reference_id.clone(),
+                reply_partition: None,
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -506,40 +584,136 @@ fn topic_partitions(topics: &[Topic], topic: &str) -> Result<Vec<i32>, QueueErro
     Ok(partitions)
 }
 
-fn engine_command_key(command: &EngineCommand) -> String {
-    match command {
-        EngineCommand::PlaceOrder(command) => command.market_id.to_string(),
-        EngineCommand::CancelOrder(command) => command.market_id.to_string(),
-        EngineCommand::LiquidatePosition(command) => command.market_id.to_string(),
+fn engine_wallet_commands_from_engine_event(event: EngineEvent) -> Vec<EngineWalletCommand> {
+    match event {
+        EngineEvent::OrderCancelled(event) => release_reservation_command(
+            event.reservation_id,
+            event.released_amount,
+            format!("order_cancelled:{}", event.order_id),
+        ),
+        EngineEvent::OrderExpired(event) => release_reservation_command(
+            event.reservation_id,
+            event.released_amount,
+            format!("order_expired:{}:{}", event.order_id, event.reason),
+        ),
+        EngineEvent::ReservationReleased(event) => release_reservation_command(
+            event.reservation_id,
+            event.released_amount,
+            format!("reservation_released:{}", event.reason),
+        ),
+        EngineEvent::TradeExecuted(event) => {
+            let fill_id = event.fill_id;
+            let mut commands = event
+                .settlements
+                .into_iter()
+                .map(|settlement| {
+                    EngineWalletCommand::SettleTrade(SettleTrade {
+                        fill_id,
+                        reservation_id: settlement.reservation_id,
+                        debit_asset: settlement.debit_asset,
+                        debit_amount: settlement.debit_amount,
+                        credit_asset: settlement.credit_asset,
+                        credit_amount: settlement.credit_amount,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            commands.extend(
+                event
+                    .fee_deltas
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, fee)| {
+                        EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
+                            user_id: fee.user_id,
+                            asset: fee.asset,
+                            total_delta: -fee.amount,
+                            locked_delta: 0,
+                            kind: String::from("TRADE_FEE"),
+                            reference_id: format!(
+                                "fill:{fill_id}:fee:{index}:{}:{}",
+                                fee.user_id, fee.fee_type
+                            ),
+                        })
+                    }),
+            );
+
+            commands
+        }
+        EngineEvent::FundingPaymentApplied(event) => {
+            let event_reference = event.engine_event_id.unwrap_or_else(|| {
+                format!("funding:{}:{}", event.market_id, event.engine_sequence)
+            });
+            event
+                .payments
+                .into_iter()
+                .enumerate()
+                .map(|(index, payment)| {
+                    EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
+                        user_id: payment.user_id,
+                        asset: payment.asset,
+                        total_delta: payment.amount,
+                        locked_delta: 0,
+                        kind: String::from("FUNDING_PAYMENT"),
+                        reference_id: format!(
+                            "{event_reference}:payment:{index}:{}",
+                            payment.position_id
+                        ),
+                    })
+                })
+                .collect()
+        }
+        EngineEvent::FeeCharged(event) => {
+            vec![EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
+                user_id: event.user_id,
+                asset: event.asset,
+                total_delta: -event.amount,
+                locked_delta: 0,
+                kind: String::from("FEE_CHARGED"),
+                reference_id: event.fee_id,
+            })]
+        }
+        EngineEvent::AccountDelta(event) => {
+            vec![EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
+                user_id: event.user_id,
+                asset: event.asset,
+                total_delta: event.total_delta,
+                locked_delta: event.locked_delta,
+                kind: String::from("ACCOUNT_DELTA"),
+                reference_id: event.account_delta_id,
+            })]
+        }
+        EngineEvent::OrderOpened(_)
+        | EngineEvent::OrderBookDelta(_)
+        | EngineEvent::MarkPriceUpdated(_)
+        | EngineEvent::FundingRateUpdated(_)
+        | EngineEvent::PositionChanged(_)
+        | EngineEvent::RiskStateUpdated(_)
+        | EngineEvent::LiquidationStarted(_)
+        | EngineEvent::LiquidationExecuted(_)
+        | EngineEvent::LiquidationCompleted(_)
+        | EngineEvent::AdlExecuted(_)
+        | EngineEvent::OrderBookSnapshotCreated(_)
+        | EngineEvent::EngineCheckpointCommitted(_) => Vec::new(),
     }
 }
 
-fn wallet_commands_from_engine_event(event: EngineEvent) -> Vec<WalletCommand> {
-    match event {
-        EngineEvent::OrderOpened(_) => Vec::new(),
-        EngineEvent::OrderBookDelta(_) => Vec::new(),
-        EngineEvent::OrderCancelled(event) => {
-            vec![WalletCommand::ReleaseReservation(ReleaseReservation {
-                reservation_id: event.reservation_id,
-                amount: event.released_amount,
-                reason: format!("order_cancelled:{}", event.order_id),
-            })]
-        }
-        EngineEvent::TradeExecuted(event) => event
-            .settlements
-            .into_iter()
-            .map(|settlement| {
-                WalletCommand::SettleTrade(SettleTrade {
-                    fill_id: event.fill_id,
-                    reservation_id: settlement.reservation_id,
-                    debit_asset: settlement.debit_asset,
-                    debit_amount: settlement.debit_amount,
-                    credit_asset: settlement.credit_asset,
-                    credit_amount: settlement.credit_amount,
-                })
-            })
-            .collect(),
+fn release_reservation_command(
+    reservation_id: String,
+    amount: i64,
+    reason: String,
+) -> Vec<EngineWalletCommand> {
+    if amount <= 0 {
+        return Vec::new();
     }
+
+    vec![EngineWalletCommand::ReleaseReservation(
+        ReleaseReservation {
+            reservation_id,
+            amount,
+            reason,
+        },
+    )]
 }
 
 fn stable_partition(key: &[u8], partition_count: usize) -> usize {
@@ -568,9 +742,15 @@ impl From<crate::worker::WalletError> for QueueError {
 mod tests {
     use protocol::{
         common::{Asset, CommandEnvelope, OrderType, Side},
-        engine::{ExecutionReason, OrderCancelled, TradeExecuted, TradeSettlement},
+        engine::{
+            AccountDelta, EngineCommand, ExecutionReason, FeeCharged, FeeDelta, FundingPayment,
+            FundingPaymentApplied, OrderCancelled, OrderExpired, ReservationReleased,
+            TradeExecuted, TradeSettlement,
+        },
         wallet::{Deposit, PlaceOrderIntent, ReleaseReservation, SettleTrade},
     };
+
+    use crate::engine_inputs::{DEFAULT_ENGINE_INPUT_KEY, EngineInputPublication};
 
     use super::*;
 
@@ -621,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_command_key_uses_market_id() {
+    fn engine_input_key_uses_constant_key_without_input_id() {
         let command = EngineCommand::PlaceOrder(
             PlaceOrderIntent {
                 envelope: CommandEnvelope {
@@ -638,20 +818,54 @@ mod tests {
                 price: 20,
                 margin_asset: Asset::USDC,
                 required_margin: 200,
+                leverage: 3,
                 reduce_only: false,
             }
             .into_reserved_order(String::from("res-1")),
         );
 
-        assert_eq!(engine_command_key(&command), "7");
+        let publication = EngineInputPublication::new(command);
+
+        assert_eq!(publication.key(), DEFAULT_ENGINE_INPUT_KEY);
+    }
+
+    #[test]
+    fn engine_input_key_uses_input_id_when_present() {
+        let mut command = PlaceOrderIntent {
+            envelope: CommandEnvelope {
+                request_id: String::from("req-1"),
+                idempotency_key: String::from("order-1"),
+                user_id: 42,
+                reply_partition: 0,
+            },
+            market_id: 7,
+            market_name: String::from("SOL-PERP"),
+            side: Side::LONG,
+            order_type: OrderType::LIMIT,
+            quantity: 10,
+            price: 20,
+            margin_asset: Asset::USDC,
+            required_margin: 200,
+            leverage: 3,
+            reduce_only: false,
+        }
+        .into_reserved_order(String::from("res-1"));
+        command.input_id = Some(String::from("input-1"));
+
+        let publication = EngineInputPublication::new(EngineCommand::PlaceOrder(command));
+
+        assert_eq!(publication.key(), "input-1");
     }
 
     #[test]
     fn engine_cancel_event_releases_reservation() {
         let commands =
-            wallet_commands_from_engine_event(EngineEvent::OrderCancelled(OrderCancelled {
+            engine_wallet_commands_from_engine_event(EngineEvent::OrderCancelled(OrderCancelled {
+                engine_event_id: Some(String::from("eng-1")),
                 engine_sequence: 1,
                 engine_timestamp_ms: 1_710_000_000_000,
+                source_input_id: None,
+                source_input_offset: None,
                 order_id: 99,
                 reservation_id: String::from("res-1"),
                 user_id: 42,
@@ -661,20 +875,106 @@ mod tests {
 
         assert_eq!(
             commands,
-            vec![WalletCommand::ReleaseReservation(ReleaseReservation {
-                reservation_id: String::from("res-1"),
-                amount: 50,
-                reason: String::from("order_cancelled:99"),
-            })]
+            vec![EngineWalletCommand::ReleaseReservation(
+                ReleaseReservation {
+                    reservation_id: String::from("res-1"),
+                    amount: 50,
+                    reason: String::from("order_cancelled:99"),
+                }
+            )]
         );
     }
 
     #[test]
-    fn engine_trade_event_becomes_settlement_commands() {
+    fn engine_order_expired_event_releases_positive_amount() {
         let commands =
-            wallet_commands_from_engine_event(EngineEvent::TradeExecuted(TradeExecuted {
-                engine_sequence: 1,
-                engine_timestamp_ms: 1_710_000_000_000,
+            engine_wallet_commands_from_engine_event(EngineEvent::OrderExpired(OrderExpired {
+                engine_event_id: Some(String::from("eng-2")),
+                market_id: 1,
+                engine_sequence: 2,
+                engine_timestamp_ms: 1_710_000_000_001,
+                source_input_id: None,
+                source_input_offset: None,
+                order_id: 100,
+                reservation_id: String::from("res-2"),
+                user_id: 42,
+                expired_quantity: 4,
+                released_amount: 25,
+                reason: String::from("TTL"),
+            }));
+
+        assert_eq!(
+            commands,
+            vec![EngineWalletCommand::ReleaseReservation(
+                ReleaseReservation {
+                    reservation_id: String::from("res-2"),
+                    amount: 25,
+                    reason: String::from("order_expired:100:TTL"),
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn engine_order_expired_event_ignores_zero_release() {
+        let commands =
+            engine_wallet_commands_from_engine_event(EngineEvent::OrderExpired(OrderExpired {
+                engine_event_id: Some(String::from("eng-3")),
+                market_id: 1,
+                engine_sequence: 3,
+                engine_timestamp_ms: 1_710_000_000_002,
+                source_input_id: None,
+                source_input_offset: None,
+                order_id: 101,
+                reservation_id: String::from("res-3"),
+                user_id: 42,
+                expired_quantity: 4,
+                released_amount: 0,
+                reason: String::from("REDUCE_ONLY_REMAINDER"),
+            }));
+
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn engine_reservation_released_event_releases_reservation() {
+        let commands = engine_wallet_commands_from_engine_event(EngineEvent::ReservationReleased(
+            ReservationReleased {
+                engine_event_id: Some(String::from("eng-4")),
+                market_id: 1,
+                engine_sequence: 4,
+                engine_timestamp_ms: 1_710_000_000_003,
+                source_input_id: None,
+                source_input_offset: None,
+                reservation_id: String::from("res-4"),
+                user_id: 42,
+                asset: Asset::USDC,
+                released_amount: 12,
+                reason: String::from("ORDER_REJECTED_AFTER_RESERVATION"),
+            },
+        ));
+
+        assert_eq!(
+            commands,
+            vec![EngineWalletCommand::ReleaseReservation(
+                ReleaseReservation {
+                    reservation_id: String::from("res-4"),
+                    amount: 12,
+                    reason: String::from("reservation_released:ORDER_REJECTED_AFTER_RESERVATION"),
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn engine_trade_event_becomes_settlement_and_fee_commands() {
+        let commands =
+            engine_wallet_commands_from_engine_event(EngineEvent::TradeExecuted(TradeExecuted {
+                engine_event_id: Some(String::from("eng-5")),
+                engine_sequence: 5,
+                engine_timestamp_ms: 1_710_000_000_004,
+                source_input_id: None,
+                source_input_offset: None,
                 fill_id: 7,
                 market_id: 1,
                 price: 100,
@@ -686,6 +986,16 @@ mod tests {
                 maker_reservation_id: Some(String::from("res-maker")),
                 taker_reservation_id: Some(String::from("res-taker")),
                 execution_reason: ExecutionReason::TRADE,
+                liquidation_id: None,
+                liquidated_user_id: None,
+                position_side: None,
+                liquidation_fee: None,
+                fee_deltas: vec![FeeDelta {
+                    user_id: 43,
+                    asset: Asset::USDC,
+                    amount: 3,
+                    fee_type: String::from("TAKER"),
+                }],
                 settlements: vec![TradeSettlement {
                     reservation_id: String::from("res-maker"),
                     debit_asset: Asset::USDC,
@@ -697,13 +1007,120 @@ mod tests {
 
         assert_eq!(
             commands,
-            vec![WalletCommand::SettleTrade(SettleTrade {
-                fill_id: 7,
-                reservation_id: String::from("res-maker"),
-                debit_asset: Asset::USDC,
-                debit_amount: 25,
-                credit_asset: Asset::USDC,
-                credit_amount: 1,
+            vec![
+                EngineWalletCommand::SettleTrade(SettleTrade {
+                    fill_id: 7,
+                    reservation_id: String::from("res-maker"),
+                    debit_asset: Asset::USDC,
+                    debit_amount: 25,
+                    credit_asset: Asset::USDC,
+                    credit_amount: 1,
+                }),
+                EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
+                    user_id: 43,
+                    asset: Asset::USDC,
+                    total_delta: -3,
+                    locked_delta: 0,
+                    kind: String::from("TRADE_FEE"),
+                    reference_id: String::from("fill:7:fee:0:43:TAKER"),
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn funding_payment_event_becomes_account_delta_commands() {
+        let commands = engine_wallet_commands_from_engine_event(
+            EngineEvent::FundingPaymentApplied(FundingPaymentApplied {
+                engine_event_id: Some(String::from("eng-6")),
+                market_id: 1,
+                engine_sequence: 6,
+                engine_timestamp_ms: 1_710_000_000_005,
+                source_input_id: None,
+                source_input_offset: None,
+                funding_interval_id: String::from("funding-1"),
+                payments: vec![FundingPayment {
+                    user_id: 42,
+                    position_id: String::from("pos-42-1"),
+                    side: Side::LONG,
+                    asset: Asset::USDC,
+                    amount: -2,
+                }],
+            }),
+        );
+
+        assert_eq!(
+            commands,
+            vec![EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
+                user_id: 42,
+                asset: Asset::USDC,
+                total_delta: -2,
+                locked_delta: 0,
+                kind: String::from("FUNDING_PAYMENT"),
+                reference_id: String::from("eng-6:payment:0:pos-42-1"),
+            })]
+        );
+    }
+
+    #[test]
+    fn fee_charged_event_becomes_account_delta_command() {
+        let commands =
+            engine_wallet_commands_from_engine_event(EngineEvent::FeeCharged(FeeCharged {
+                engine_event_id: Some(String::from("eng-7")),
+                market_id: 1,
+                engine_sequence: 7,
+                engine_timestamp_ms: 1_710_000_000_006,
+                source_input_id: None,
+                source_input_offset: None,
+                fee_id: String::from("fee-1"),
+                user_id: 42,
+                asset: Asset::USDC,
+                amount: 5,
+                fee_type: String::from("LIQUIDATION"),
+                destination: String::from("INSURANCE_FUND"),
+            }));
+
+        assert_eq!(
+            commands,
+            vec![EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
+                user_id: 42,
+                asset: Asset::USDC,
+                total_delta: -5,
+                locked_delta: 0,
+                kind: String::from("FEE_CHARGED"),
+                reference_id: String::from("fee-1"),
+            })]
+        );
+    }
+
+    #[test]
+    fn account_delta_event_becomes_account_delta_command() {
+        let commands =
+            engine_wallet_commands_from_engine_event(EngineEvent::AccountDelta(AccountDelta {
+                engine_event_id: Some(String::from("eng-8")),
+                market_id: 1,
+                engine_sequence: 8,
+                engine_timestamp_ms: 1_710_000_000_007,
+                source_input_id: None,
+                source_input_offset: None,
+                account_delta_id: String::from("acct-1"),
+                user_id: 42,
+                asset: Asset::USDC,
+                total_delta: -205,
+                locked_delta: -100,
+                reason: String::from("LIQUIDATION_SETTLEMENT"),
+                reference_id: String::from("liq-1"),
+            }));
+
+        assert_eq!(
+            commands,
+            vec![EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
+                user_id: 42,
+                asset: Asset::USDC,
+                total_delta: -205,
+                locked_delta: -100,
+                kind: String::from("ACCOUNT_DELTA"),
+                reference_id: String::from("acct-1"),
             })]
         );
     }

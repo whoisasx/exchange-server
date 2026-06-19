@@ -1,7 +1,7 @@
 use std::{fmt, ops::Range, sync::Arc, time::Duration};
 
 use protocol::{
-    engine::{EngineCommand, EngineEvent, EngineReply},
+    engine::{EngineEvent, EngineInput, EngineReply},
     wallet::WalletEvent,
 };
 use rskafka::{
@@ -36,9 +36,9 @@ impl ProjectorQueue {
 
         let sources = vec![
             ProjectorSource::new(
-                SourceKind::EngineCommand,
-                settings.engine_commands_topic.clone(),
-                partition_clients(&client, &topics, &settings.engine_commands_topic).await?,
+                SourceKind::EngineInput,
+                settings.engine_input_topic.clone(),
+                partition_clients(&client, &topics, &settings.engine_input_topic).await?,
             ),
             ProjectorSource::new(
                 SourceKind::EngineReply,
@@ -105,7 +105,7 @@ impl ProjectorSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
-    EngineCommand,
+    EngineInput,
     EngineReply,
     EngineEvent,
     WalletEvent,
@@ -114,7 +114,7 @@ enum SourceKind {
 impl fmt::Display for SourceKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EngineCommand => f.write_str("engine command"),
+            Self::EngineInput => f.write_str("engine input"),
             Self::EngineReply => f.write_str("engine reply"),
             Self::EngineEvent => f.write_str("engine event"),
             Self::WalletEvent => f.write_str("wallet event"),
@@ -198,10 +198,10 @@ async fn process_payload(
     worker: &ProjectorWorker,
 ) -> Result<(), crate::worker::ProjectorError> {
     match kind {
-        SourceKind::EngineCommand => match serde_json::from_slice::<EngineCommand>(&payload) {
-            Ok(command) => {
+        SourceKind::EngineInput => match serde_json::from_slice::<EngineInput>(&payload) {
+            Ok(input) => {
                 worker
-                    .process_engine_command(command, topic, partition, next_offset)
+                    .process_engine_input(input, topic, partition, next_offset)
                     .await
             }
             Err(error) => {
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn source_kind_display_names_are_stable() {
-        assert_eq!(SourceKind::EngineCommand.to_string(), "engine command");
+        assert_eq!(SourceKind::EngineInput.to_string(), "engine input");
         assert_eq!(SourceKind::WalletEvent.to_string(), "wallet event");
     }
 }

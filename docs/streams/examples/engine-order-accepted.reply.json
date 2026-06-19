@@ -1,8 +1,0 @@
-{
-  "type": "OrderAccepted",
-  "payload": {
-    "request_id": "req_place_001",
-    "order_id": 9001,
-    "reservation_id": "res_place_001"
-  }
-}

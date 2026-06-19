@@ -3,7 +3,7 @@ use std::{error::Error, fmt};
 use protocol::wallet::WalletCommand;
 
 use crate::{
-    processor::{WalletProcessResult, WalletProcessor},
+    processor::{EngineWalletCommand, WalletProcessResult, WalletProcessor},
     redpanda::WalletQueue,
     repository::WalletRepository,
     settings::WalletSettings,
@@ -64,6 +64,16 @@ impl WalletWorker {
             .map_err(|error| WalletError::new(format!("wallet command failed: {error:?}")))
     }
 
+    pub async fn process_engine_command(
+        &self,
+        command: EngineWalletCommand,
+    ) -> Result<WalletProcessResult, WalletError> {
+        self.processor
+            .process_engine_command(command)
+            .await
+            .map_err(|error| WalletError::new(format!("engine wallet command failed: {error:?}")))
+    }
+
     pub async fn load_queue_offset(
         &self,
         topic: &str,
@@ -89,7 +99,7 @@ impl WalletWorker {
 
     pub async fn run(&self) -> Result<(), WalletError> {
         println!(
-            "wallet worker starting: consuming '{}' and forwarding valid orders to '{}'",
+            "wallet worker starting: consuming '{}' and forwarding valid inputs to '{}'",
             self.settings.wallet_commands_topic, self.settings.engine_commands_topic
         );
 

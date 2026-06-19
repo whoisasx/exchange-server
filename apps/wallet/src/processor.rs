@@ -1,15 +1,19 @@
 use protocol::{
+    common::Asset,
     engine::EngineCommand,
     wallet::{
         CancelOrderIntent, CommandAccepted, CommandRejected, InsufficientFunds, PlaceOrderIntent,
-        WalletCommand, WalletDepositApplied, WalletEvent, WalletFundsReleased, WalletFundsReserved,
-        WalletReply, WalletTradeSettled, WalletWithdrawalApplied,
+        ReleaseReservation, SettleTrade, WalletCommand, WalletDepositApplied, WalletEvent,
+        WalletFundsReleased, WalletFundsReserved, WalletReply, WalletTradeSettled,
+        WalletWithdrawalApplied,
     },
 };
 use serde_json::Value;
 
 use crate::{
-    repository::{WalletRepository, WalletRepositoryError, insufficient_funds_reply},
+    repository::{
+        AccountDeltaUpdate, WalletRepository, WalletRepositoryError, insufficient_funds_reply,
+    },
     router::{WalletAction, route_command},
 };
 
@@ -18,6 +22,23 @@ pub struct WalletProcessResult {
     pub wallet_replies: Vec<WalletReply>,
     pub wallet_events: Vec<WalletEvent>,
     pub engine_commands: Vec<EngineCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineWalletCommand {
+    ReleaseReservation(ReleaseReservation),
+    SettleTrade(SettleTrade),
+    ApplyAccountDelta(ApplyAccountDelta),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyAccountDelta {
+    pub user_id: i64,
+    pub asset: Asset,
+    pub total_delta: i64,
+    pub locked_delta: i64,
+    pub kind: String,
+    pub reference_id: String,
 }
 
 #[derive(Clone)]
@@ -132,38 +153,21 @@ impl WalletProcessor {
                     engine_commands: Vec::new(),
                 })
             }
-            WalletAction::ReleaseReservation(release) => {
-                let reservation = self.repository.release_reservation(&release).await?;
+            WalletAction::ReleaseReservation(release) => self.release_reservation(release).await,
+            WalletAction::SettleTrade(settle) => self.settle_trade(settle).await,
+        }
+    }
 
-                Ok(WalletProcessResult {
-                    wallet_replies: Vec::new(),
-                    wallet_events: vec![WalletEvent::FundsReleased(WalletFundsReleased {
-                        user_id: reservation.user_id,
-                        reservation_id: reservation.reservation_id,
-                        asset: reservation.asset,
-                        amount: release.amount,
-                        reason: release.reason,
-                    })],
-                    engine_commands: Vec::new(),
-                })
+    pub async fn process_engine_command(
+        &self,
+        command: EngineWalletCommand,
+    ) -> Result<WalletProcessResult, WalletRepositoryError> {
+        match command {
+            EngineWalletCommand::ReleaseReservation(release) => {
+                self.release_reservation(release).await
             }
-            WalletAction::SettleTrade(settle) => {
-                let reservation = self.repository.settle_trade(&settle).await?;
-
-                Ok(WalletProcessResult {
-                    wallet_replies: Vec::new(),
-                    wallet_events: vec![WalletEvent::TradeSettled(WalletTradeSettled {
-                        user_id: reservation.user_id,
-                        fill_id: settle.fill_id,
-                        reservation_id: reservation.reservation_id,
-                        debit_asset: settle.debit_asset,
-                        debit_amount: settle.debit_amount,
-                        credit_asset: settle.credit_asset,
-                        credit_amount: settle.credit_amount,
-                    })],
-                    engine_commands: Vec::new(),
-                })
-            }
+            EngineWalletCommand::SettleTrade(settle) => self.settle_trade(settle).await,
+            EngineWalletCommand::ApplyAccountDelta(delta) => self.apply_account_delta(delta).await,
         }
     }
 
@@ -277,6 +281,64 @@ impl WalletProcessor {
         })
     }
 
+    async fn release_reservation(
+        &self,
+        release: ReleaseReservation,
+    ) -> Result<WalletProcessResult, WalletRepositoryError> {
+        let reservation = self.repository.release_reservation(&release).await?;
+
+        Ok(WalletProcessResult {
+            wallet_replies: Vec::new(),
+            wallet_events: vec![WalletEvent::FundsReleased(WalletFundsReleased {
+                user_id: reservation.user_id,
+                reservation_id: reservation.reservation_id,
+                asset: reservation.asset,
+                amount: release.amount,
+                reason: release.reason,
+            })],
+            engine_commands: Vec::new(),
+        })
+    }
+
+    async fn settle_trade(
+        &self,
+        settle: SettleTrade,
+    ) -> Result<WalletProcessResult, WalletRepositoryError> {
+        let reservation = self.repository.settle_trade(&settle).await?;
+
+        Ok(WalletProcessResult {
+            wallet_replies: Vec::new(),
+            wallet_events: vec![WalletEvent::TradeSettled(WalletTradeSettled {
+                user_id: reservation.user_id,
+                fill_id: settle.fill_id,
+                reservation_id: reservation.reservation_id,
+                debit_asset: settle.debit_asset,
+                debit_amount: settle.debit_amount,
+                credit_asset: settle.credit_asset,
+                credit_amount: settle.credit_amount,
+            })],
+            engine_commands: Vec::new(),
+        })
+    }
+
+    async fn apply_account_delta(
+        &self,
+        delta: ApplyAccountDelta,
+    ) -> Result<WalletProcessResult, WalletRepositoryError> {
+        self.repository
+            .apply_account_delta(&AccountDeltaUpdate {
+                user_id: delta.user_id,
+                asset: delta.asset,
+                total_delta: delta.total_delta,
+                locked_delta: delta.locked_delta,
+                kind: delta.kind,
+                reference_id: delta.reference_id,
+            })
+            .await?;
+
+        Ok(WalletProcessResult::default())
+    }
+
     async fn record_reply(
         &self,
         user_id: i64,
@@ -385,6 +447,7 @@ mod tests {
             price: 20,
             margin_asset: Asset::USDC,
             required_margin: 200,
+            leverage: 2,
             reduce_only: true,
         };
 
@@ -393,6 +456,7 @@ mod tests {
         assert_eq!(order.envelope.idempotency_key, "client-order-1");
         assert_eq!(order.reservation_id, "res-1");
         assert!(order.reduce_only);
+        assert_eq!(order.leverage, 2);
     }
 
     #[test]

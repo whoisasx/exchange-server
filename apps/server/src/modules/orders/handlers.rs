@@ -19,6 +19,9 @@ use crate::{
     utils::types::ResponseBody,
 };
 
+const MIN_LEVERAGE: i64 = 1;
+const MAX_LEVERAGE: i64 = 100;
+
 #[post("/")]
 pub async fn place_order(req: HttpRequest, body: web::Json<PlaceOrder>) -> impl Responder {
     let extensions = req.extensions();
@@ -34,18 +37,10 @@ pub async fn place_order(req: HttpRequest, body: web::Json<PlaceOrder>) -> impl 
     };
 
     let order_data = body.into_inner();
-    if order_data.market_id <= 0 {
-        return bad_request("market_id must be greater than zero");
-    }
-    if order_data.quantity <= 0 {
-        return bad_request("quantity must be greater than zero");
-    }
-    if order_data.price < 0 {
-        return bad_request("price cannot be negative");
-    }
-    if order_data.margin <= 0 {
-        return bad_request("margin must be greater than zero");
-    }
+    let validated_order = match validate_place_order(&order_data) {
+        Ok(order) => order,
+        Err(message) => return bad_request(message),
+    };
 
     let context = match command_context(&req, user_extension) {
         Ok(context) => context,
@@ -62,13 +57,14 @@ pub async fn place_order(req: HttpRequest, body: web::Json<PlaceOrder>) -> impl 
     let command = WalletCommand::PlaceOrderIntent(PlaceOrderIntent {
         envelope: context.envelope,
         market_id: order_data.market_id,
-        market_name: order_data.market_name,
+        market_name: validated_order.market_name,
         side: side_to_protocol(order_data.side),
         order_type: order_type_to_protocol(order_data.order_type),
         quantity: order_data.quantity,
         price: order_data.price,
         margin_asset: asset_to_protocol(order_data.margin_asset),
-        required_margin: order_data.margin,
+        required_margin: validated_order.required_margin,
+        leverage: order_data.leverage,
         reduce_only: false,
     });
     let key = user_extension.userid.to_string();
@@ -87,6 +83,63 @@ pub async fn place_order(req: HttpRequest, body: web::Json<PlaceOrder>) -> impl 
     }
 
     final_or_queued_response(receiver, context.wait_timeout, context.ack).await
+}
+
+#[derive(Debug)]
+struct ValidatedPlaceOrder {
+    market_name: String,
+    required_margin: i64,
+}
+
+fn validate_place_order(order_data: &PlaceOrder) -> Result<ValidatedPlaceOrder, String> {
+    if order_data.market_id <= 0 {
+        return Err(String::from("market_id must be greater than zero"));
+    }
+    let market_name = order_data.market_name.trim();
+    if market_name.is_empty() {
+        return Err(String::from("market_name cannot be empty"));
+    }
+    if order_data.quantity <= 0 {
+        return Err(String::from("quantity must be greater than zero"));
+    }
+    if order_data.price < 0 {
+        return Err(String::from("price cannot be negative"));
+    }
+    if !(MIN_LEVERAGE..=MAX_LEVERAGE).contains(&order_data.leverage) {
+        return Err(format!(
+            "leverage must be between {MIN_LEVERAGE} and {MAX_LEVERAGE}"
+        ));
+    }
+    if order_data.margin <= 0 {
+        return Err(String::from("margin must be greater than zero"));
+    }
+
+    let required_margin = if order_data.price == 0 {
+        order_data.margin
+    } else {
+        let computed_margin =
+            compute_required_margin(order_data.quantity, order_data.price, order_data.leverage)?;
+        if order_data.margin < computed_margin {
+            return Err(format!(
+                "margin must be at least required margin ({computed_margin})"
+            ));
+        }
+        computed_margin
+    };
+
+    Ok(ValidatedPlaceOrder {
+        market_name: String::from(market_name),
+        required_margin,
+    })
+}
+
+fn compute_required_margin(quantity: i64, price: i64, leverage: i64) -> Result<i64, String> {
+    let notional = i128::from(quantity) * i128::from(price);
+    let leverage = i128::from(leverage);
+    let required_margin = (notional + leverage - 1) / leverage;
+
+    i64::try_from(required_margin)
+        .map_err(|_| String::from("required margin exceeds supported range"))
 }
 
 #[delete("/")]
@@ -213,6 +266,7 @@ pub async fn get_open_orders(_req: HttpRequest, path: web::Path<i64>) -> impl Re
 #[cfg(test)]
 mod tests {
     use actix_web::{App, http::StatusCode, test};
+    use db::dto::{AssetType, OrderType, SideType};
 
     use super::*;
 
@@ -259,5 +313,51 @@ mod tests {
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn valid_order() -> PlaceOrder {
+        PlaceOrder {
+            market_id: 1,
+            market_name: String::from(" SOL-PERP "),
+            side: SideType::LONG,
+            order_type: OrderType::LIMIT,
+            quantity: 10,
+            price: 100,
+            margin: 1000,
+            margin_asset: AssetType::USDC,
+            leverage: 1,
+        }
+    }
+
+    #[actix_web::test]
+    async fn validate_place_order_computes_required_margin_from_leverage() {
+        let mut order = valid_order();
+        order.leverage = 10;
+
+        let validated = validate_place_order(&order).expect("order should be valid");
+
+        assert_eq!(validated.market_name, "SOL-PERP");
+        assert_eq!(validated.required_margin, 100);
+    }
+
+    #[actix_web::test]
+    async fn validate_place_order_rejects_margin_below_computed_requirement() {
+        let mut order = valid_order();
+        order.leverage = 10;
+        order.margin = 99;
+
+        let error = validate_place_order(&order).expect_err("margin should be too low");
+
+        assert_eq!(error, "margin must be at least required margin (100)");
+    }
+
+    #[actix_web::test]
+    async fn validate_place_order_rejects_invalid_leverage() {
+        let mut order = valid_order();
+        order.leverage = MAX_LEVERAGE + 1;
+
+        let error = validate_place_order(&order).expect_err("leverage should be invalid");
+
+        assert_eq!(error, "leverage must be between 1 and 100");
     }
 }

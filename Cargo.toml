@@ -6,6 +6,7 @@ members = [
   "apps/e2e-smoke",
   "apps/fake-engine",
   "apps/ledger",
+  "apps/orderbook-archiver",
   "apps/projector",
   "apps/wallet",
   "apps/timeseries",

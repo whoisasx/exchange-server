@@ -1,8 +1,0 @@
-{
-  "type": "OrderRejected",
-  "payload": {
-    "request_id": "req_place_002",
-    "reservation_id": "res_place_002",
-    "reason": "post_only_would_cross"
-  }
-}

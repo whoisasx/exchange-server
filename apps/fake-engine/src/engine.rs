@@ -8,9 +8,11 @@ use protocol::{
     common::{Asset, Side},
     engine::{
         CancelAccepted, CancelRejected, EngineCommand, EngineEvent, EngineReply, ExecutionReason,
-        LiquidatePosition, LiquidationAccepted, LiquidationRejected, OrderAccepted, OrderBookDelta,
-        OrderBookLevel, OrderCancelled, OrderOpened, OrderRejected, ReservedPlaceOrder,
-        TradeExecuted, TradeSettlement,
+        FundingPaymentApplied, FundingRateUpdated as FundingRateUpdatedEvent,
+        FundingRateUpdatedInput, FundingSettlementTickInput, LiquidatePosition,
+        LiquidationAccepted, LiquidationRejected, MarkPriceUpdated as MarkPriceUpdatedEvent,
+        MarkPriceUpdatedInput, OrderAccepted, OrderBookDelta, OrderBookLevel, OrderCancelled,
+        OrderOpened, OrderRejected, ReservedPlaceOrder, TradeExecuted, TradeSettlement,
     },
     wallet::{WalletEvent, WalletFundsReserved},
 };
@@ -32,6 +34,38 @@ pub struct EventPublication {
 pub struct FakeEngineOutput {
     pub replies: Vec<ReplyPublication>,
     pub events: Vec<EventPublication>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct InputMetadata {
+    input_id: Option<String>,
+    input_offset: Option<i64>,
+}
+
+impl InputMetadata {
+    fn from_input(input: &EngineCommand, input_offset: Option<i64>) -> Self {
+        let input_id = match input {
+            EngineCommand::PlaceOrder(order) => order.input_id.clone(),
+            EngineCommand::CancelOrder(cancel) => cancel.input_id.clone(),
+            EngineCommand::LiquidatePosition(liquidation) => liquidation.input_id.clone(),
+            EngineCommand::MarkPriceUpdated(mark) => mark.input_id.clone(),
+            EngineCommand::FundingRateUpdated(funding) => funding.input_id.clone(),
+            EngineCommand::FundingSettlementTick(tick) => tick.input_id.clone(),
+        };
+
+        Self {
+            input_id,
+            input_offset,
+        }
+    }
+
+    fn source_input_id(&self) -> Option<String> {
+        self.input_id.clone()
+    }
+
+    fn source_input_offset(&self) -> Option<i64> {
+        self.input_offset
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -60,10 +94,29 @@ impl FakeEngine {
     }
 
     pub fn process_command(&self, command: EngineCommand) -> FakeEngineOutput {
-        match command {
-            EngineCommand::PlaceOrder(order) => self.process_place_order(order),
+        self.process_input(command, None)
+    }
+
+    pub fn process_input(
+        &self,
+        input: EngineCommand,
+        source_input_offset: Option<i64>,
+    ) -> FakeEngineOutput {
+        let metadata = InputMetadata::from_input(&input, source_input_offset);
+
+        match input {
+            EngineCommand::PlaceOrder(order) => self.process_place_order(order, &metadata),
             EngineCommand::LiquidatePosition(liquidation) => {
-                self.process_liquidate_position(liquidation)
+                self.process_liquidate_position(liquidation, &metadata)
+            }
+            EngineCommand::MarkPriceUpdated(input) => {
+                self.process_mark_price_updated(input, &metadata)
+            }
+            EngineCommand::FundingRateUpdated(input) => {
+                self.process_funding_rate_updated(input, &metadata)
+            }
+            EngineCommand::FundingSettlementTick(input) => {
+                self.process_funding_settlement_tick(input, &metadata)
             }
             EngineCommand::CancelOrder(cancel) => {
                 let mut state = self.state.lock().expect("fake engine state poisoned");
@@ -75,8 +128,11 @@ impl FakeEngine {
                         EventPublication {
                             key: cancel.market_id.to_string(),
                             event: EngineEvent::OrderCancelled(OrderCancelled {
+                                engine_event_id: None,
                                 engine_sequence: state.next_engine_sequence(order.market_id),
                                 engine_timestamp_ms: unix_timestamp_ms(),
+                                source_input_id: metadata.source_input_id(),
+                                source_input_offset: metadata.source_input_offset(),
                                 order_id: order.order_id,
                                 reservation_id: order.reservation_id,
                                 user_id: order.user_id,
@@ -91,6 +147,7 @@ impl FakeEngine {
                                 order.side,
                                 order.price,
                                 level_quantity,
+                                &metadata,
                             ),
                         },
                     ];
@@ -101,6 +158,8 @@ impl FakeEngine {
                             key: cancel.envelope.request_id.clone(),
                             reply: EngineReply::CancelAccepted(CancelAccepted {
                                 request_id: cancel.envelope.request_id,
+                                source_input_id: metadata.source_input_id(),
+                                source_input_offset: metadata.source_input_offset(),
                                 order_id: cancel.order_id,
                             }),
                         }],
@@ -113,6 +172,8 @@ impl FakeEngine {
                             key: cancel.envelope.request_id.clone(),
                             reply: EngineReply::CancelRejected(CancelRejected {
                                 request_id: cancel.envelope.request_id,
+                                source_input_id: metadata.source_input_id(),
+                                source_input_offset: metadata.source_input_offset(),
                                 order_id: cancel.order_id,
                                 reason: String::from("order is not resting in fake engine"),
                             }),
@@ -124,16 +185,26 @@ impl FakeEngine {
         }
     }
 
-    fn process_place_order(&self, order: ReservedPlaceOrder) -> FakeEngineOutput {
-        if order.quantity <= 0 || order.price < 0 {
+    fn process_place_order(
+        &self,
+        order: ReservedPlaceOrder,
+        metadata: &InputMetadata,
+    ) -> FakeEngineOutput {
+        if order.quantity <= 0
+            || order.price < 0
+            || order.reserved_margin_amount < 0
+            || order.leverage <= 0
+        {
             return FakeEngineOutput {
                 replies: vec![ReplyPublication {
                     partition: order.envelope.reply_partition,
                     key: order.envelope.request_id.clone(),
                     reply: EngineReply::OrderRejected(OrderRejected {
                         request_id: order.envelope.request_id,
+                        source_input_id: metadata.source_input_id(),
+                        source_input_offset: metadata.source_input_offset(),
                         reservation_id: Some(order.reservation_id),
-                        reason: String::from("invalid price or quantity"),
+                        reason: String::from("invalid price, quantity, or margin metadata"),
                     }),
                 }],
                 events: Vec::new(),
@@ -149,6 +220,8 @@ impl FakeEngine {
                 key: order.envelope.request_id.clone(),
                 reply: EngineReply::OrderAccepted(OrderAccepted {
                     request_id: order.envelope.request_id,
+                    source_input_id: metadata.source_input_id(),
+                    source_input_offset: metadata.source_input_offset(),
                     order_id,
                     reservation_id: order.reservation_id.clone(),
                 }),
@@ -164,7 +237,8 @@ impl FakeEngine {
             let maker_market_id = maker.market_id;
             let maker_side = maker.side;
             let maker_price = maker.price;
-            let fill = state.execute_fill(&mut maker, &mut incoming, ExecutionReason::TRADE);
+            let fill =
+                state.execute_fill(&mut maker, &mut incoming, ExecutionReason::TRADE, metadata);
 
             output.events.push(EventPublication {
                 key: fill.market_id.to_string(),
@@ -183,6 +257,7 @@ impl FakeEngine {
                     maker_side,
                     maker_price,
                     level_quantity,
+                    metadata,
                 ),
             });
         }
@@ -198,8 +273,11 @@ impl FakeEngine {
             output.events.push(EventPublication {
                 key: incoming_market_id.to_string(),
                 event: EngineEvent::OrderOpened(OrderOpened {
+                    engine_event_id: None,
                     engine_sequence: state.next_engine_sequence(incoming_market_id),
                     engine_timestamp_ms: unix_timestamp_ms(),
+                    source_input_id: metadata.source_input_id(),
+                    source_input_offset: metadata.source_input_offset(),
                     order_id: incoming.order_id,
                     reservation_id: incoming.reservation_id.clone(),
                     user_id: incoming.user_id,
@@ -216,6 +294,7 @@ impl FakeEngine {
                     incoming_side,
                     incoming_price,
                     level_quantity,
+                    metadata,
                 ),
             });
         }
@@ -223,7 +302,11 @@ impl FakeEngine {
         output
     }
 
-    fn process_liquidate_position(&self, liquidation: LiquidatePosition) -> FakeEngineOutput {
+    fn process_liquidate_position(
+        &self,
+        liquidation: LiquidatePosition,
+        metadata: &InputMetadata,
+    ) -> FakeEngineOutput {
         if liquidation.quantity <= 0
             || liquidation.price < 0
             || liquidation.market_id <= 0
@@ -235,6 +318,8 @@ impl FakeEngine {
                     key: liquidation.envelope.request_id.clone(),
                     reply: EngineReply::LiquidationRejected(LiquidationRejected {
                         request_id: liquidation.envelope.request_id,
+                        source_input_id: metadata.source_input_id(),
+                        source_input_offset: metadata.source_input_offset(),
                         liquidation_id: liquidation.liquidation_id,
                         reason: String::from("invalid liquidation command"),
                     }),
@@ -252,6 +337,8 @@ impl FakeEngine {
                 key: liquidation.envelope.request_id.clone(),
                 reply: EngineReply::LiquidationAccepted(LiquidationAccepted {
                     request_id: liquidation.envelope.request_id,
+                    source_input_id: metadata.source_input_id(),
+                    source_input_offset: metadata.source_input_offset(),
                     liquidation_id: liquidation.liquidation_id.clone(),
                     order_id,
                 }),
@@ -267,7 +354,12 @@ impl FakeEngine {
             let maker_market_id = maker.market_id;
             let maker_side = maker.side;
             let maker_price = maker.price;
-            let fill = state.execute_fill(&mut maker, &mut incoming, ExecutionReason::LIQUIDATION);
+            let fill = state.execute_fill(
+                &mut maker,
+                &mut incoming,
+                ExecutionReason::LIQUIDATION,
+                metadata,
+            );
 
             output.events.push(EventPublication {
                 key: fill.market_id.to_string(),
@@ -286,11 +378,96 @@ impl FakeEngine {
                     maker_side,
                     maker_price,
                     level_quantity,
+                    metadata,
                 ),
             });
         }
 
         output
+    }
+
+    fn process_mark_price_updated(
+        &self,
+        input: MarkPriceUpdatedInput,
+        metadata: &InputMetadata,
+    ) -> FakeEngineOutput {
+        let mut state = self.state.lock().expect("fake engine state poisoned");
+        let market_id = input.market_id;
+
+        FakeEngineOutput {
+            replies: Vec::new(),
+            events: vec![EventPublication {
+                key: market_id.to_string(),
+                event: EngineEvent::MarkPriceUpdated(MarkPriceUpdatedEvent {
+                    engine_event_id: None,
+                    market_id,
+                    engine_sequence: state.next_engine_sequence(market_id),
+                    engine_timestamp_ms: unix_timestamp_ms(),
+                    source_input_id: metadata.source_input_id(),
+                    source_input_offset: metadata.source_input_offset(),
+                    mark_price: input.mark_price,
+                    index_price: input.index_price,
+                    valid_until_ms: input.valid_until_ms,
+                    source_sequence: input.source_sequence,
+                    source_status: input.source_status,
+                }),
+            }],
+        }
+    }
+
+    fn process_funding_rate_updated(
+        &self,
+        input: FundingRateUpdatedInput,
+        metadata: &InputMetadata,
+    ) -> FakeEngineOutput {
+        let mut state = self.state.lock().expect("fake engine state poisoned");
+        let market_id = input.market_id;
+
+        FakeEngineOutput {
+            replies: Vec::new(),
+            events: vec![EventPublication {
+                key: market_id.to_string(),
+                event: EngineEvent::FundingRateUpdated(FundingRateUpdatedEvent {
+                    engine_event_id: None,
+                    market_id,
+                    engine_sequence: state.next_engine_sequence(market_id),
+                    engine_timestamp_ms: unix_timestamp_ms(),
+                    source_input_id: metadata.source_input_id(),
+                    source_input_offset: metadata.source_input_offset(),
+                    funding_interval_id: input.funding_interval_id,
+                    rate: input.rate,
+                    rate_scale: input.rate_scale,
+                    interval_start_ms: input.interval_start_ms,
+                    interval_end_ms: input.interval_end_ms,
+                }),
+            }],
+        }
+    }
+
+    fn process_funding_settlement_tick(
+        &self,
+        input: FundingSettlementTickInput,
+        metadata: &InputMetadata,
+    ) -> FakeEngineOutput {
+        let mut state = self.state.lock().expect("fake engine state poisoned");
+        let market_id = input.market_id;
+
+        FakeEngineOutput {
+            replies: Vec::new(),
+            events: vec![EventPublication {
+                key: market_id.to_string(),
+                event: EngineEvent::FundingPaymentApplied(FundingPaymentApplied {
+                    engine_event_id: None,
+                    market_id,
+                    engine_sequence: state.next_engine_sequence(market_id),
+                    engine_timestamp_ms: unix_timestamp_ms(),
+                    source_input_id: metadata.source_input_id(),
+                    source_input_offset: metadata.source_input_offset(),
+                    funding_interval_id: input.funding_interval_id,
+                    payments: Vec::new(),
+                }),
+            }],
+        }
     }
 }
 
@@ -344,11 +521,14 @@ impl EngineState {
         order_id: i64,
         command: &ReservedPlaceOrder,
     ) -> RestingOrder {
-        let reservation = self
-            .reservations
-            .get(&command.reservation_id)
-            .copied()
-            .unwrap_or_default();
+        let (margin_asset, margin_remaining) = match self.reservations.get(&command.reservation_id)
+        {
+            Some(reservation) => (reservation.asset, reservation.remaining.max(1)),
+            None => (
+                command.margin_asset,
+                fallback_reserved_margin_amount(command),
+            ),
+        };
 
         RestingOrder {
             order_id,
@@ -360,8 +540,8 @@ impl EngineState {
             price: command.price,
             reduce_only: command.reduce_only,
             settle_on_fill: true,
-            margin_asset: reservation.asset,
-            margin_remaining: reservation.remaining.max(1),
+            margin_asset,
+            margin_remaining,
         }
     }
 
@@ -401,6 +581,7 @@ impl EngineState {
         maker: &mut RestingOrder,
         taker: &mut RestingOrder,
         execution_reason: ExecutionReason,
+        metadata: &InputMetadata,
     ) -> TradeExecuted {
         let fill_quantity = maker.remaining_quantity.min(taker.remaining_quantity);
         let fill_price = if maker.price > 0 {
@@ -433,10 +614,14 @@ impl EngineState {
         if taker.settle_on_fill {
             settlements.push(settlement_for(taker, taker_debit));
         }
+        let is_liquidation = execution_reason == ExecutionReason::LIQUIDATION;
 
         TradeExecuted {
+            engine_event_id: None,
             engine_sequence: self.next_engine_sequence(maker.market_id),
             engine_timestamp_ms: unix_timestamp_ms(),
+            source_input_id: metadata.source_input_id(),
+            source_input_offset: metadata.source_input_offset(),
             fill_id: self.next_fill_id(),
             market_id: maker.market_id,
             price: fill_price,
@@ -448,6 +633,11 @@ impl EngineState {
             maker_reservation_id: Some(maker.reservation_id.clone()),
             taker_reservation_id: Some(taker.reservation_id.clone()),
             execution_reason,
+            liquidation_id: is_liquidation.then(|| taker.reservation_id.clone()),
+            liquidated_user_id: is_liquidation.then_some(taker.user_id),
+            position_side: is_liquidation.then_some(opposite_side(taker.side)),
+            liquidation_fee: None,
+            fee_deltas: Vec::new(),
             settlements,
         }
     }
@@ -485,6 +675,7 @@ impl EngineState {
         side: Side,
         price: i64,
         quantity: i64,
+        metadata: &InputMetadata,
     ) -> EngineEvent {
         let level = OrderBookLevel { price, quantity };
         let (bids, asks) = match side {
@@ -493,8 +684,11 @@ impl EngineState {
         };
 
         EngineEvent::OrderBookDelta(OrderBookDelta {
+            engine_event_id: None,
             engine_sequence: self.next_engine_sequence(market_id),
             engine_timestamp_ms: unix_timestamp_ms(),
+            source_input_id: metadata.source_input_id(),
+            source_input_offset: metadata.source_input_offset(),
             market_id,
             bids,
             asks,
@@ -509,19 +703,20 @@ fn unix_timestamp_ms() -> i64 {
         .as_millis() as i64
 }
 
+fn fallback_reserved_margin_amount(command: &ReservedPlaceOrder) -> i64 {
+    if command.reserved_margin_amount > 0 {
+        command.reserved_margin_amount
+    } else if command.reduce_only {
+        0
+    } else {
+        1
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ReservationInfo {
     asset: Asset,
     remaining: i64,
-}
-
-impl Default for ReservationInfo {
-    fn default() -> Self {
-        Self {
-            asset: Asset::USDC,
-            remaining: 1,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -584,7 +779,10 @@ fn settlement_for(order: &RestingOrder, debit_amount: i64) -> TradeSettlement {
 mod tests {
     use protocol::{
         common::{CommandEnvelope, OrderType},
-        engine::{CancelOrder, LiquidatePosition},
+        engine::{
+            CancelOrder, FundingRateUpdatedInput, FundingSettlementTickInput, LiquidatePosition,
+            MarkPriceUpdatedInput,
+        },
         wallet::WalletFundsReserved,
     };
 
@@ -682,6 +880,49 @@ mod tests {
         assert_eq!(delta.engine_sequence, 4);
         assert_eq!(delta.bids[0].price, 100);
         assert_eq!(delta.bids[0].quantity, 0);
+    }
+
+    #[test]
+    fn place_order_uses_reserved_margin_amount_without_wallet_event() {
+        let engine = FakeEngine::new(100, 200);
+        let mut maker = order("req-1", "res-maker", 1, Side::LONG, 10, 100);
+        maker.reserved_margin_amount = 600;
+        maker.leverage = 5;
+        let mut taker = order("req-2", "res-taker", 2, Side::SHORT, 10, 100);
+        taker.reserved_margin_amount = 900;
+        taker.leverage = 3;
+
+        let _ = engine.process_command(EngineCommand::PlaceOrder(maker));
+        let output = engine.process_command(EngineCommand::PlaceOrder(taker));
+
+        let EngineEvent::TradeExecuted(trade) = &output.events[0].event else {
+            panic!("expected trade event");
+        };
+        assert_eq!(trade.settlements.len(), 2);
+        assert_eq!(trade.settlements[0].debit_amount, 600);
+        assert_eq!(trade.settlements[1].debit_amount, 900);
+    }
+
+    #[test]
+    fn process_input_populates_source_metadata() {
+        let engine = FakeEngine::new(100, 200);
+        let mut place_order = order("req-source", "res-source", 42, Side::LONG, 10, 100);
+        place_order.input_id = Some(String::from("input-place-1"));
+        place_order.reserved_margin_amount = 500;
+
+        let output = engine.process_input(EngineCommand::PlaceOrder(place_order), Some(123));
+
+        let EngineReply::OrderAccepted(reply) = &output.replies[0].reply else {
+            panic!("expected order accepted reply");
+        };
+        assert_eq!(reply.source_input_id.as_deref(), Some("input-place-1"));
+        assert_eq!(reply.source_input_offset, Some(123));
+
+        let EngineEvent::OrderOpened(event) = &output.events[0].event else {
+            panic!("expected order opened event");
+        };
+        assert_eq!(event.source_input_id.as_deref(), Some("input-place-1"));
+        assert_eq!(event.source_input_offset, Some(123));
     }
 
     #[test]
@@ -859,6 +1100,7 @@ mod tests {
         )));
 
         let output = engine.process_command(EngineCommand::CancelOrder(CancelOrder {
+            input_id: None,
             envelope: envelope("req-cancel", 42),
             market_id: 1,
             order_id: 100,
@@ -887,6 +1129,80 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn market_and_funding_inputs_emit_events_without_replies() {
+        let engine = FakeEngine::new(100, 200);
+
+        let mark = engine.process_input(
+            EngineCommand::MarkPriceUpdated(MarkPriceUpdatedInput {
+                input_id: Some(String::from("input-mark-1")),
+                market_id: 1,
+                mark_price: 101,
+                index_price: 100,
+                source_timestamp_ms: 1_710_000_000_000,
+                published_at_ms: 1_710_000_000_100,
+                valid_until_ms: 1_710_000_005_100,
+                source_sequence: 45_001,
+                source_status: String::from("VALID"),
+            }),
+            Some(10),
+        );
+        assert!(mark.replies.is_empty());
+        let EngineEvent::MarkPriceUpdated(event) = &mark.events[0].event else {
+            panic!("expected mark price event");
+        };
+        assert_eq!(event.engine_sequence, 1);
+        assert_eq!(event.source_input_id.as_deref(), Some("input-mark-1"));
+        assert_eq!(event.source_input_offset, Some(10));
+        assert_eq!(event.mark_price, 101);
+
+        let funding_rate = engine.process_input(
+            EngineCommand::FundingRateUpdated(FundingRateUpdatedInput {
+                input_id: Some(String::from("input-funding-rate-1")),
+                market_id: 1,
+                funding_interval_id: String::from("funding-1"),
+                rate: 25,
+                rate_scale: 1_000_000,
+                interval_start_ms: 1_710_000_000_000,
+                interval_end_ms: 1_710_028_800_000,
+                source_timestamp_ms: 1_710_000_001_000,
+            }),
+            Some(11),
+        );
+        assert!(funding_rate.replies.is_empty());
+        let EngineEvent::FundingRateUpdated(event) = &funding_rate.events[0].event else {
+            panic!("expected funding rate event");
+        };
+        assert_eq!(event.engine_sequence, 2);
+        assert_eq!(
+            event.source_input_id.as_deref(),
+            Some("input-funding-rate-1")
+        );
+        assert_eq!(event.source_input_offset, Some(11));
+        assert_eq!(event.rate, 25);
+
+        let settlement = engine.process_input(
+            EngineCommand::FundingSettlementTick(FundingSettlementTickInput {
+                input_id: Some(String::from("input-funding-settle-1")),
+                market_id: 1,
+                funding_interval_id: String::from("funding-1"),
+                settle_at_ms: 1_710_028_800_000,
+            }),
+            Some(12),
+        );
+        assert!(settlement.replies.is_empty());
+        let EngineEvent::FundingPaymentApplied(event) = &settlement.events[0].event else {
+            panic!("expected funding payment event");
+        };
+        assert_eq!(event.engine_sequence, 3);
+        assert_eq!(
+            event.source_input_id.as_deref(),
+            Some("input-funding-settle-1")
+        );
+        assert_eq!(event.source_input_offset, Some(12));
+        assert!(event.payments.is_empty());
+    }
+
     fn reserve(engine: &FakeEngine, request_id: &str, reservation_id: &str, amount: i64) {
         engine.observe_wallet_event(WalletEvent::FundsReserved(WalletFundsReserved {
             request_id: String::from(request_id),
@@ -906,6 +1222,7 @@ mod tests {
         price: i64,
     ) -> ReservedPlaceOrder {
         ReservedPlaceOrder {
+            input_id: None,
             envelope: envelope(request_id, user_id),
             reservation_id: String::from(reservation_id),
             market_id: 1,
@@ -915,6 +1232,9 @@ mod tests {
             quantity,
             price,
             reduce_only: false,
+            margin_asset: Asset::USDC,
+            reserved_margin_amount: 0,
+            leverage: 1,
         }
     }
 
@@ -945,6 +1265,7 @@ mod tests {
         price: i64,
     ) -> LiquidatePosition {
         LiquidatePosition {
+            input_id: None,
             envelope: envelope(request_id, 0),
             liquidation_id: String::from(liquidation_id),
             market_id: 1,
@@ -953,6 +1274,7 @@ mod tests {
             position_side,
             quantity,
             price,
+            request_source: None,
         }
     }
 

@@ -9,6 +9,10 @@ pub const WALLET_COMMANDS_TOPIC: &str = "wallet.commands";
 pub const WALLET_REPLIES_TOPIC: &str = "wallet.replies";
 pub const WALLET_EVENTS_TOPIC: &str = "wallet.events";
 
+fn default_leverage() -> i64 {
+    1
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum WalletCommand {
@@ -31,12 +35,15 @@ pub struct PlaceOrderIntent {
     pub price: i64,
     pub margin_asset: Asset,
     pub required_margin: i64,
+    #[serde(default = "default_leverage")]
+    pub leverage: i64,
     pub reduce_only: bool,
 }
 
 impl PlaceOrderIntent {
     pub fn into_reserved_order(self, reservation_id: String) -> ReservedPlaceOrder {
         ReservedPlaceOrder {
+            input_id: None,
             envelope: self.envelope,
             reservation_id,
             market_id: self.market_id,
@@ -46,6 +53,9 @@ impl PlaceOrderIntent {
             quantity: self.quantity,
             price: self.price,
             reduce_only: self.reduce_only,
+            margin_asset: self.margin_asset,
+            reserved_margin_amount: self.required_margin,
+            leverage: self.leverage,
         }
     }
 }
@@ -60,6 +70,7 @@ pub struct CancelOrderIntent {
 impl CancelOrderIntent {
     pub fn into_engine_cancel_order(self) -> CancelOrder {
         CancelOrder {
+            input_id: None,
             envelope: self.envelope,
             market_id: self.market_id,
             order_id: self.order_id,
@@ -229,6 +240,7 @@ mod tests {
             price: 20,
             margin_asset: Asset::USDC,
             required_margin: 200,
+            leverage: 10,
             reduce_only: true,
         };
 
@@ -240,6 +252,9 @@ mod tests {
         assert_eq!(order.quantity, 10);
         assert_eq!(order.price, 20);
         assert!(order.reduce_only);
+        assert_eq!(order.margin_asset, Asset::USDC);
+        assert_eq!(order.reserved_margin_amount, 200);
+        assert_eq!(order.leverage, 10);
     }
 
     #[test]
