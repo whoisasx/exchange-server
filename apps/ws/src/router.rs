@@ -118,6 +118,7 @@ fn wallet_event_user_id(event: &WalletEvent) -> i64 {
         WalletEvent::TradeSettled(event) => event.user_id,
         WalletEvent::DepositApplied(event) => event.user_id,
         WalletEvent::WithdrawalApplied(event) => event.user_id,
+        WalletEvent::AccountDeltaApplied(event) => event.user_id,
     }
 }
 

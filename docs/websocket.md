@@ -85,6 +85,11 @@ Forward engine market and account-impacting events unchanged, including:
 
 Forward `wallet.events` that carry authenticated user/account routing as private account updates. Ledger and balance facts come from wallet events, not from websocket delivery.
 
+Wallet event payloads are documented in `docs/wallet-events.md`. WS routes all
+wallet events by `payload.user_id`, including `AccountDeltaApplied` for fees,
+funding payments, liquidation settlement, ADL settlement, and other
+engine-originated balance mutations after wallet applies them.
+
 Engine replies are request lifecycle messages only. If surfaced over websocket, they are not durable facts and must not be used as accounting, order, fill, or balance truth.
 
 The service starts from latest Redpanda offsets. It is live fanout only. For state that needs gap-free live stitching, clients should subscribe before fetching the REST snapshot.

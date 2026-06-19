@@ -164,6 +164,7 @@ pub enum WalletEvent {
     TradeSettled(WalletTradeSettled),
     DepositApplied(WalletDepositApplied),
     WithdrawalApplied(WalletWithdrawalApplied),
+    AccountDeltaApplied(WalletAccountDeltaApplied),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +214,18 @@ pub struct WalletWithdrawalApplied {
     pub asset: Asset,
     pub amount: i64,
     pub destination: String,
+    pub total: i64,
+    pub locked: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletAccountDeltaApplied {
+    pub user_id: i64,
+    pub asset: Asset,
+    pub total_delta: i64,
+    pub locked_delta: i64,
+    pub kind: String,
+    pub reference_id: String,
     pub total: i64,
     pub locked: i64,
 }
@@ -291,6 +304,27 @@ mod tests {
         assert_eq!(value["type"], "FundsReserved");
         assert_eq!(value["payload"]["user_id"], 42);
         assert_eq!(value["payload"]["reservation_id"], "res-1");
+    }
+
+    #[test]
+    fn wallet_account_delta_event_carries_dynamic_kind_and_balance() {
+        let event = WalletEvent::AccountDeltaApplied(WalletAccountDeltaApplied {
+            user_id: 42,
+            asset: Asset::USDC,
+            total_delta: -3,
+            locked_delta: 0,
+            kind: String::from("TRADE_FEE"),
+            reference_id: String::from("fill:7:fee:0:42:TAKER"),
+            total: 997,
+            locked: 0,
+        });
+        let value = serde_json::to_value(event).expect("event should serialize");
+
+        assert_eq!(value["type"], "AccountDeltaApplied");
+        assert_eq!(value["payload"]["user_id"], 42);
+        assert_eq!(value["payload"]["kind"], "TRADE_FEE");
+        assert_eq!(value["payload"]["total_delta"], -3);
+        assert_eq!(value["payload"]["total"], 997);
     }
 
     #[test]

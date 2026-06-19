@@ -3,9 +3,9 @@ use protocol::{
     engine::EngineCommand,
     wallet::{
         CancelOrderIntent, CommandAccepted, CommandRejected, InsufficientFunds, PlaceOrderIntent,
-        ReleaseReservation, SettleTrade, WalletCommand, WalletDepositApplied, WalletEvent,
-        WalletFundsReleased, WalletFundsReserved, WalletReply, WalletTradeSettled,
-        WalletWithdrawalApplied,
+        ReleaseReservation, SettleTrade, WalletAccountDeltaApplied, WalletCommand,
+        WalletDepositApplied, WalletEvent, WalletFundsReleased, WalletFundsReserved, WalletReply,
+        WalletTradeSettled, WalletWithdrawalApplied,
     },
 };
 use serde_json::Value;
@@ -325,18 +325,38 @@ impl WalletProcessor {
         &self,
         delta: ApplyAccountDelta,
     ) -> Result<WalletProcessResult, WalletRepositoryError> {
-        self.repository
+        let balance = self
+            .repository
             .apply_account_delta(&AccountDeltaUpdate {
                 user_id: delta.user_id,
                 asset: delta.asset,
                 total_delta: delta.total_delta,
                 locked_delta: delta.locked_delta,
-                kind: delta.kind,
-                reference_id: delta.reference_id,
+                kind: delta.kind.clone(),
+                reference_id: delta.reference_id.clone(),
             })
             .await?;
 
-        Ok(WalletProcessResult::default())
+        let Some(balance) = balance else {
+            return Ok(WalletProcessResult::default());
+        };
+
+        Ok(WalletProcessResult {
+            wallet_replies: Vec::new(),
+            wallet_events: vec![WalletEvent::AccountDeltaApplied(
+                WalletAccountDeltaApplied {
+                    user_id: delta.user_id,
+                    asset: delta.asset,
+                    total_delta: delta.total_delta,
+                    locked_delta: delta.locked_delta,
+                    kind: delta.kind,
+                    reference_id: delta.reference_id,
+                    total: balance.total,
+                    locked: balance.locked,
+                },
+            )],
+            engine_commands: Vec::new(),
+        })
     }
 
     async fn record_reply(

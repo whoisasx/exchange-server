@@ -312,6 +312,9 @@ Server reply consumers use wallet and engine replies to unblock HTTP requests. R
 
 Ledger consumes `wallet.events` as the accounting source. Engine events may be audit context, but wallet events are the ledger source for balance mutations.
 
+Wallet event schema and ledger/ws routing fields are documented in
+`docs/wallet-events.md`.
+
 Timeseries consumes `TradeExecuted` for candles and trade history. It should use `engine_timestamp_ms` for buckets and `(market_id, engine_sequence)` for idempotency.
 
 ## Recovery

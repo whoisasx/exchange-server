@@ -111,7 +111,7 @@ impl LedgerRepository {
                 .bind(event_id)
                 .bind(entry.user_id)
                 .bind(asset_to_db(entry.asset))
-                .bind(entry.kind)
+                .bind(&entry.kind)
                 .bind(entry.total_delta)
                 .bind(entry.locked_delta)
                 .bind(&entry.reference_id)

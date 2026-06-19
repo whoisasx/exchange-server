@@ -440,9 +440,9 @@ impl WalletRepository {
     pub async fn apply_account_delta(
         &self,
         delta: &AccountDeltaUpdate,
-    ) -> Result<bool, WalletRepositoryError> {
+    ) -> Result<Option<BalanceSnapshot>, WalletRepositoryError> {
         if delta.total_delta == 0 && delta.locked_delta == 0 {
-            return Ok(false);
+            return Ok(None);
         }
 
         let mut tx = self.pool.begin().await?;
@@ -467,7 +467,7 @@ impl WalletRepository {
 
         if inserted.is_none() {
             tx.commit().await?;
-            return Ok(false);
+            return Ok(None);
         }
 
         let balance = sqlx::query(
@@ -494,14 +494,17 @@ impl WalletRepository {
         .fetch_optional(&mut *tx)
         .await?;
 
-        if balance.is_none() {
+        let Some(balance) = balance else {
             tx.rollback().await?;
             return Err(WalletRepositoryError::InvalidAccountDelta);
-        }
+        };
 
         tx.commit().await?;
 
-        Ok(true)
+        Ok(Some(BalanceSnapshot {
+            total: balance.get("total"),
+            locked: balance.get("locked"),
+        }))
     }
 
     pub async fn load_queue_offset(

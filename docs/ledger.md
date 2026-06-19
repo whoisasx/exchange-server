@@ -24,6 +24,8 @@ Ledger v1 does not replace wallet writes; it mirrors wallet events into:
 - `ledger_entries`: normalized balance deltas derived from each event.
 - `ledger_offsets`: consumed Redpanda offsets.
 
+The full wallet event schema is in `docs/wallet-events.md`.
+
 Entry mapping:
 
 | Wallet event | Ledger entries |
@@ -33,6 +35,6 @@ Entry mapping:
 | `FundsReserved` | `RESERVE`: `total_delta=0`, `locked_delta=+amount` |
 | `FundsReleased` | `RELEASE`: `total_delta=0`, `locked_delta=-amount` |
 | `TradeSettled` | `TRADE_DEBIT`: `total_delta=-debit_amount`, `locked_delta=-debit_amount`; `TRADE_CREDIT`: `total_delta=+credit_amount`, `locked_delta=0` |
-| Funding, fee, liquidation, ADL, or insurance wallet settlement events | Balance deltas exactly as emitted by wallet |
+| `AccountDeltaApplied` | `<kind>`: `total_delta=total_delta`, `locked_delta=locked_delta` |
 
 Ledger starts from stored offsets, or earliest offsets when no offset is stored.

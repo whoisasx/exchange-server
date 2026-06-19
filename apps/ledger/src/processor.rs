@@ -1,8 +1,8 @@
 use protocol::{
     common::Asset,
     wallet::{
-        WalletDepositApplied, WalletEvent, WalletFundsReleased, WalletFundsReserved,
-        WalletTradeSettled, WalletWithdrawalApplied,
+        WalletAccountDeltaApplied, WalletDepositApplied, WalletEvent, WalletFundsReleased,
+        WalletFundsReserved, WalletTradeSettled, WalletWithdrawalApplied,
     },
 };
 use serde_json::Value;
@@ -19,7 +19,7 @@ pub struct LedgerRecord {
 pub struct LedgerEntryDraft {
     pub user_id: i64,
     pub asset: Asset,
-    pub kind: &'static str,
+    pub kind: String,
     pub total_delta: i64,
     pub locked_delta: i64,
     pub reference_id: String,
@@ -52,6 +52,7 @@ pub fn ledger_record_from_wallet_event(
         WalletEvent::TradeSettled(event) => trade_settled_entries(event),
         WalletEvent::DepositApplied(event) => deposit_entries(event),
         WalletEvent::WithdrawalApplied(event) => withdrawal_entries(event),
+        WalletEvent::AccountDeltaApplied(event) => account_delta_entries(event),
     };
 
     Ok(LedgerRecord {
@@ -71,7 +72,7 @@ fn funds_reserved_entries(
         vec![LedgerEntryDraft {
             user_id: event.user_id,
             asset: event.asset,
-            kind: "RESERVE",
+            kind: String::from("RESERVE"),
             total_delta: 0,
             locked_delta: event.amount,
             reference_id: event.reservation_id.clone(),
@@ -88,7 +89,7 @@ fn funds_released_entries(
         vec![LedgerEntryDraft {
             user_id: event.user_id,
             asset: event.asset,
-            kind: "RELEASE",
+            kind: String::from("RELEASE"),
             total_delta: 0,
             locked_delta: -event.amount,
             reference_id: event.reservation_id.clone(),
@@ -106,7 +107,7 @@ fn trade_settled_entries(event: &WalletTradeSettled) -> (&'static str, i64, Vec<
             LedgerEntryDraft {
                 user_id: event.user_id,
                 asset: event.debit_asset,
-                kind: "TRADE_DEBIT",
+                kind: String::from("TRADE_DEBIT"),
                 total_delta: -event.debit_amount,
                 locked_delta: -event.debit_amount,
                 reference_id: reference_id.clone(),
@@ -114,7 +115,7 @@ fn trade_settled_entries(event: &WalletTradeSettled) -> (&'static str, i64, Vec<
             LedgerEntryDraft {
                 user_id: event.user_id,
                 asset: event.credit_asset,
-                kind: "TRADE_CREDIT",
+                kind: String::from("TRADE_CREDIT"),
                 total_delta: event.credit_amount,
                 locked_delta: 0,
                 reference_id,
@@ -130,7 +131,7 @@ fn deposit_entries(event: &WalletDepositApplied) -> (&'static str, i64, Vec<Ledg
         vec![LedgerEntryDraft {
             user_id: event.user_id,
             asset: event.asset,
-            kind: "DEPOSIT",
+            kind: String::from("DEPOSIT"),
             total_delta: event.amount,
             locked_delta: 0,
             reference_id: event.reference_id.clone(),
@@ -147,10 +148,27 @@ fn withdrawal_entries(
         vec![LedgerEntryDraft {
             user_id: event.user_id,
             asset: event.asset,
-            kind: "WITHDRAWAL",
+            kind: String::from("WITHDRAWAL"),
             total_delta: -event.amount,
             locked_delta: 0,
             reference_id: event.request_id.clone(),
+        }],
+    )
+}
+
+fn account_delta_entries(
+    event: &WalletAccountDeltaApplied,
+) -> (&'static str, i64, Vec<LedgerEntryDraft>) {
+    (
+        "AccountDeltaApplied",
+        event.user_id,
+        vec![LedgerEntryDraft {
+            user_id: event.user_id,
+            asset: event.asset,
+            kind: event.kind.clone(),
+            total_delta: event.total_delta,
+            locked_delta: event.locked_delta,
+            reference_id: event.reference_id.clone(),
         }],
     )
 }
@@ -160,8 +178,8 @@ mod tests {
     use protocol::{
         common::Asset,
         wallet::{
-            WalletDepositApplied, WalletEvent, WalletFundsReleased, WalletFundsReserved,
-            WalletTradeSettled, WalletWithdrawalApplied,
+            WalletAccountDeltaApplied, WalletDepositApplied, WalletEvent, WalletFundsReleased,
+            WalletFundsReserved, WalletTradeSettled, WalletWithdrawalApplied,
         },
     };
 
@@ -265,5 +283,29 @@ mod tests {
         assert_eq!(record.entries[1].kind, "TRADE_CREDIT");
         assert_eq!(record.entries[1].total_delta, 10);
         assert_eq!(record.entries[1].locked_delta, 0);
+    }
+
+    #[test]
+    fn account_delta_event_maps_to_dynamic_kind_entry() {
+        let record = ledger_record_from_wallet_event(&WalletEvent::AccountDeltaApplied(
+            WalletAccountDeltaApplied {
+                user_id: 42,
+                asset: Asset::USDC,
+                total_delta: -3,
+                locked_delta: 0,
+                kind: String::from("TRADE_FEE"),
+                reference_id: String::from("fill:7:fee:0:42:TAKER"),
+                total: 997,
+                locked: 0,
+            },
+        ))
+        .expect("account delta should map");
+
+        assert_eq!(record.event_type, "AccountDeltaApplied");
+        assert_eq!(record.user_id, 42);
+        assert_eq!(record.entries[0].kind, "TRADE_FEE");
+        assert_eq!(record.entries[0].total_delta, -3);
+        assert_eq!(record.entries[0].locked_delta, 0);
+        assert_eq!(record.entries[0].reference_id, "fill:7:fee:0:42:TAKER");
     }
 }
