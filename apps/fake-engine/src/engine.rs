@@ -212,7 +212,11 @@ impl FakeEngine {
         }
 
         let mut state = self.state.lock().expect("fake engine state poisoned");
-        let order_id = state.next_order_id();
+        let order_id = if order.order_id > 0 {
+            order.order_id
+        } else {
+            state.next_order_id()
+        };
         let mut incoming = state.resting_order_from_command(order_id, &order);
         let mut output = FakeEngineOutput {
             replies: vec![ReplyPublication {
@@ -1224,6 +1228,7 @@ mod tests {
         ReservedPlaceOrder {
             input_id: None,
             envelope: envelope(request_id, user_id),
+            order_id: 0,
             reservation_id: String::from(reservation_id),
             market_id: 1,
             market_name: String::from("SOL-PERP"),

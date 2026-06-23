@@ -34,6 +34,7 @@ pub struct ReservedPlaceOrder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_id: Option<String>,
     pub envelope: CommandEnvelope,
+    pub order_id: i64,
     pub reservation_id: String,
     pub market_id: i64,
     pub market_name: String,
@@ -692,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn place_order_defaults_target_margin_fields_for_legacy_json() {
+    fn place_order_defaults_optional_margin_fields() {
         let input = serde_json::from_str::<EngineInput>(
             r#"{
                 "type":"PlaceOrder",
@@ -703,6 +704,7 @@ mod tests {
                         "user_id":42,
                         "reply_partition":0
                     },
+                    "order_id":99,
                     "reservation_id":"res-1",
                     "market_id":1,
                     "market_name":"SOL-PERP",
@@ -719,6 +721,7 @@ mod tests {
         match input {
             EngineInput::PlaceOrder(order) => {
                 assert_eq!(order.input_id, None);
+                assert_eq!(order.order_id, 99);
                 assert_eq!(order.margin_asset, Asset::USDC);
                 assert_eq!(order.reserved_margin_amount, 0);
                 assert_eq!(order.leverage, 1);

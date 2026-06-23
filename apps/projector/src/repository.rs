@@ -86,6 +86,42 @@ struct EngineEventLogMetadata<'a> {
     checkpoint_id: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TradeParticipant {
+    Maker,
+    Taker,
+}
+
+impl TradeParticipant {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Maker => "maker",
+            Self::Taker => "taker",
+        }
+    }
+
+    fn order_id(self, event: &TradeExecuted) -> i64 {
+        match self {
+            Self::Maker => event.maker_order_id,
+            Self::Taker => event.taker_order_id,
+        }
+    }
+
+    fn user_id(self, event: &TradeExecuted) -> i64 {
+        match self {
+            Self::Maker => event.maker_user_id,
+            Self::Taker => event.taker_user_id,
+        }
+    }
+
+    fn reservation_id<'a>(self, event: &'a TradeExecuted) -> Option<&'a str> {
+        match self {
+            Self::Maker => event.maker_reservation_id.as_deref(),
+            Self::Taker => event.taker_reservation_id.as_deref(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ProjectorRepository {
     pool: Pool<Postgres>,
@@ -466,18 +502,7 @@ impl ProjectorRepository {
         next_offset: i64,
     ) -> Result<(), ProjectorRepositoryError> {
         let mut tx = self.pool.begin().await?;
-        let mut maker = load_context_for_order_in_tx(
-            &mut tx,
-            event.maker_reservation_id.as_deref(),
-            event.maker_order_id,
-        )
-        .await?;
-        let mut taker = load_context_for_order_in_tx(
-            &mut tx,
-            event.taker_reservation_id.as_deref(),
-            event.taker_order_id,
-        )
-        .await?;
+        let (mut maker, mut taker) = load_trade_contexts_in_tx(&mut tx, event).await?;
         maker.order_id = Some(event.maker_order_id);
         taker.order_id = Some(event.taker_order_id);
 
@@ -513,7 +538,7 @@ impl ProjectorRepository {
                 executed_at
             )
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TO_TIMESTAMP($12::DOUBLE PRECISION / 1000.0))
-            ON CONFLICT(fill_id) DO NOTHING
+            ON CONFLICT DO NOTHING
             RETURNING fill_id
             "#,
         )
@@ -1010,6 +1035,7 @@ async fn project_position_for_fill_in_tx(
     let position = load_position_for_update_in_tx(tx, context.user_id, context.market_id).await?;
 
     match position {
+        None if context.reduce_only => Ok(()),
         None => {
             let initial_margin = proportional_margin(context.margin, context.quantity, quantity);
             insert_open_position_in_tx(
@@ -1024,6 +1050,7 @@ async fn project_position_for_fill_in_tx(
             )
             .await
         }
+        Some(position) if context.reduce_only && position.side == context.side => Ok(()),
         Some(position) if position.side == context.side => {
             let added_margin = proportional_margin(context.margin, context.quantity, quantity);
             increase_position_in_tx(tx, &position, fill_id, quantity, price, added_margin).await
@@ -1473,6 +1500,180 @@ async fn load_context_for_order_in_tx(
     })
 }
 
+async fn load_trade_contexts_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    event: &TradeExecuted,
+) -> Result<(StoredOrderContext, StoredOrderContext), ProjectorRepositoryError> {
+    let maker = maybe_load_context_for_order_in_tx(
+        tx,
+        event.maker_reservation_id.as_deref(),
+        event.maker_order_id,
+    )
+    .await?;
+    let taker = maybe_load_context_for_order_in_tx(
+        tx,
+        event.taker_reservation_id.as_deref(),
+        event.taker_order_id,
+    )
+    .await?;
+
+    if !is_synthetic_liquidation_or_adl_trade(event) {
+        return Ok((
+            maker.ok_or_else(|| {
+                missing_order_context_for_participant(event, TradeParticipant::Maker)
+            })?,
+            taker.ok_or_else(|| {
+                missing_order_context_for_participant(event, TradeParticipant::Taker)
+            })?,
+        ));
+    }
+
+    let needs_synthetic = maker.is_none() || taker.is_none();
+    let market_name = if needs_synthetic {
+        Some(load_market_name_in_tx(tx, event.market_id).await?)
+    } else {
+        None
+    };
+    let maker_side = maker.as_ref().map(|context| context.side);
+    let taker_side = taker.as_ref().map(|context| context.side);
+
+    let maker = match maker {
+        Some(context) => context,
+        None => synthetic_liquidation_context(
+            event,
+            TradeParticipant::Maker,
+            market_name.as_deref().unwrap_or_default(),
+            taker_side,
+        )?,
+    };
+    let taker = match taker {
+        Some(context) => context,
+        None => synthetic_liquidation_context(
+            event,
+            TradeParticipant::Taker,
+            market_name.as_deref().unwrap_or_default(),
+            maker_side,
+        )?,
+    };
+
+    Ok((maker, taker))
+}
+
+async fn maybe_load_context_for_order_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    reservation_id: Option<&str>,
+    order_id: i64,
+) -> Result<Option<StoredOrderContext>, ProjectorRepositoryError> {
+    match load_context_for_order_in_tx(tx, reservation_id, order_id).await {
+        Ok(context) => Ok(Some(context)),
+        Err(error) if error.is_missing_order_context() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+async fn load_market_name_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    market_id: i64,
+) -> Result<String, ProjectorRepositoryError> {
+    let market_name = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT market_name
+        FROM markets
+        WHERE market_id=$1
+        "#,
+    )
+    .bind(market_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(market_name)
+}
+
+fn synthetic_liquidation_context(
+    event: &TradeExecuted,
+    participant: TradeParticipant,
+    market_name: &str,
+    counterpart_side: Option<SideType>,
+) -> Result<StoredOrderContext, ProjectorRepositoryError> {
+    let side = synthetic_liquidation_side(event, participant, counterpart_side)
+        .ok_or_else(|| missing_order_context_for_participant(event, participant))?;
+
+    Ok(StoredOrderContext {
+        reservation_id: participant
+            .reservation_id(event)
+            .map(String::from)
+            .or_else(|| {
+                event
+                    .liquidation_id
+                    .as_ref()
+                    .map(|liquidation_id| format!("{liquidation_id}:{}", participant.label()))
+            }),
+        request_id: event.source_input_id.clone().unwrap_or_else(|| {
+            format!(
+                "synthetic:{}:{}:{}",
+                event.market_id,
+                event.engine_sequence,
+                participant.label()
+            )
+        }),
+        order_id: Some(participant.order_id(event)),
+        user_id: participant.user_id(event),
+        market_id: event.market_id,
+        market_name: String::from(market_name),
+        side,
+        order_type: DbOrderType::MARKET,
+        quantity: event.quantity,
+        price: event.price,
+        margin: 0,
+        reduce_only: true,
+    })
+}
+
+fn synthetic_liquidation_side(
+    event: &TradeExecuted,
+    participant: TradeParticipant,
+    counterpart_side: Option<SideType>,
+) -> Option<SideType> {
+    if let Some(position_side) = event.position_side {
+        if let Some(liquidated_user_id) = event.liquidated_user_id {
+            return Some(if participant.user_id(event) == liquidated_user_id {
+                opposite_side(position_side)
+            } else {
+                side_to_db(position_side)
+            });
+        }
+
+        return Some(match participant {
+            TradeParticipant::Maker => side_to_db(position_side),
+            TradeParticipant::Taker => opposite_side(position_side),
+        });
+    }
+
+    counterpart_side.map(opposite_db_side).or_else(|| {
+        Some(match participant {
+            TradeParticipant::Maker => SideType::LONG,
+            TradeParticipant::Taker => SideType::SHORT,
+        })
+    })
+}
+
+fn is_synthetic_liquidation_or_adl_trade(event: &TradeExecuted) -> bool {
+    event.execution_reason == ExecutionReason::LIQUIDATION
+        || event.liquidation_id.is_some()
+        || event.liquidated_user_id.is_some()
+        || event.position_side.is_some()
+}
+
+fn missing_order_context_for_participant(
+    event: &TradeExecuted,
+    participant: TradeParticipant,
+) -> ProjectorRepositoryError {
+    ProjectorRepositoryError::MissingOrderContext {
+        reservation_id: participant.reservation_id(event).map(String::from),
+        order_id: Some(participant.order_id(event)),
+    }
+}
+
 async fn load_context_by_reservation_in_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     reservation_id: &str,
@@ -1824,6 +2025,13 @@ fn opposite_side(side: Side) -> SideType {
     }
 }
 
+fn opposite_db_side(side: SideType) -> SideType {
+    match side {
+        SideType::LONG => SideType::SHORT,
+        SideType::SHORT => SideType::LONG,
+    }
+}
+
 fn order_type_to_db(order_type: OrderType) -> DbOrderType {
     match order_type {
         OrderType::LIMIT => DbOrderType::LIMIT,
@@ -1930,6 +2138,106 @@ mod tests {
     fn protocol_side_mapping_matches_db_names() {
         assert_eq!(side_to_db(Side::LONG), SideType::LONG);
         assert_eq!(side_to_db(Side::SHORT), SideType::SHORT);
+    }
+
+    #[test]
+    fn synthetic_liquidation_context_closes_liquidated_taker_side() {
+        let event = liquidation_trade_event();
+
+        let context = synthetic_liquidation_context(
+            &event,
+            TradeParticipant::Taker,
+            "SOL-PERP",
+            Some(SideType::LONG),
+        )
+        .expect("liquidation context should be derivable");
+
+        assert_eq!(context.reservation_id, Some(String::from("liq-1")));
+        assert_eq!(context.order_id, Some(9003));
+        assert_eq!(context.user_id, 42);
+        assert_eq!(context.market_id, 7);
+        assert_eq!(context.market_name, "SOL-PERP");
+        assert_eq!(context.side, SideType::SHORT);
+        assert_eq!(context.order_type, DbOrderType::MARKET);
+        assert_eq!(context.quantity, 5);
+        assert_eq!(context.price, 95);
+        assert_eq!(context.margin, 0);
+        assert!(context.reduce_only);
+    }
+
+    #[test]
+    fn synthetic_liquidation_context_uses_position_side_for_counterparty() {
+        let event = TradeExecuted {
+            maker_reservation_id: None,
+            ..liquidation_trade_event()
+        };
+
+        let context = synthetic_liquidation_context(
+            &event,
+            TradeParticipant::Maker,
+            "SOL-PERP",
+            Some(SideType::SHORT),
+        )
+        .expect("counterparty context should be derivable");
+
+        assert_eq!(context.reservation_id, Some(String::from("liq-1:maker")));
+        assert_eq!(context.order_id, Some(9001));
+        assert_eq!(context.user_id, 43);
+        assert_eq!(context.side, SideType::LONG);
+        assert!(context.reduce_only);
+    }
+
+    #[test]
+    fn synthetic_liquidation_side_can_fall_back_to_counterpart_side() {
+        let event = TradeExecuted {
+            position_side: None,
+            liquidated_user_id: None,
+            ..liquidation_trade_event()
+        };
+
+        assert_eq!(
+            synthetic_liquidation_side(&event, TradeParticipant::Maker, Some(SideType::SHORT)),
+            Some(SideType::LONG)
+        );
+    }
+
+    #[test]
+    fn synthetic_liquidation_side_uses_stable_default_without_side_hints() {
+        let event = TradeExecuted {
+            position_side: None,
+            liquidated_user_id: None,
+            ..liquidation_trade_event()
+        };
+
+        assert_eq!(
+            synthetic_liquidation_side(&event, TradeParticipant::Maker, None),
+            Some(SideType::LONG)
+        );
+        assert_eq!(
+            synthetic_liquidation_side(&event, TradeParticipant::Taker, None),
+            Some(SideType::SHORT)
+        );
+    }
+
+    #[test]
+    fn synthetic_context_fallback_is_not_enabled_for_plain_trades() {
+        let plain_trade = TradeExecuted {
+            execution_reason: ExecutionReason::TRADE,
+            liquidation_id: None,
+            liquidated_user_id: None,
+            position_side: None,
+            ..liquidation_trade_event()
+        };
+        let adl_like_trade = TradeExecuted {
+            execution_reason: ExecutionReason::TRADE,
+            liquidation_id: Some(String::from("liq-adl-1")),
+            liquidated_user_id: Some(42),
+            position_side: Some(Side::LONG),
+            ..liquidation_trade_event()
+        };
+
+        assert!(!is_synthetic_liquidation_or_adl_trade(&plain_trade));
+        assert!(is_synthetic_liquidation_or_adl_trade(&adl_like_trade));
     }
 
     #[test]
@@ -2066,5 +2374,32 @@ mod tests {
         assert_eq!(entry.market_id, None);
         assert_eq!(entry.engine_sequence, None);
         assert_eq!(entry.engine_timestamp_ms, 1_710_000_000_002);
+    }
+
+    fn liquidation_trade_event() -> TradeExecuted {
+        TradeExecuted {
+            engine_event_id: Some(String::from("eng-7-11")),
+            engine_sequence: 11,
+            engine_timestamp_ms: 1_710_000_000_000,
+            source_input_id: Some(String::from("mark-1")),
+            source_input_offset: Some(10),
+            fill_id: 7002,
+            market_id: 7,
+            price: 95,
+            quantity: 5,
+            maker_order_id: 9001,
+            taker_order_id: 9003,
+            maker_user_id: 43,
+            taker_user_id: 42,
+            maker_reservation_id: Some(String::from("res-maker")),
+            taker_reservation_id: Some(String::from("liq-1")),
+            execution_reason: ExecutionReason::LIQUIDATION,
+            liquidation_id: Some(String::from("liq-1")),
+            liquidated_user_id: Some(42),
+            position_side: Some(Side::LONG),
+            liquidation_fee: None,
+            fee_deltas: Vec::new(),
+            settlements: Vec::new(),
+        }
     }
 }

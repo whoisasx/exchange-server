@@ -4,6 +4,7 @@ resolver = "3"
 members = [
   "apps/server",
   "apps/e2e-smoke",
+  "apps/engine-ingress",
   "apps/fake-engine",
   "apps/ledger",
   "apps/orderbook-archiver",

@@ -42,6 +42,7 @@ mod tests {
                 user_id: 42,
                 reply_partition: 0,
             },
+            order_id: 99,
             market_id: 1,
             market_name: String::from("SOL-PERP"),
             side: Side::LONG,

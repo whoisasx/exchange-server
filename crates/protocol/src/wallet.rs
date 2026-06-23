@@ -27,6 +27,7 @@ pub enum WalletCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaceOrderIntent {
     pub envelope: CommandEnvelope,
+    pub order_id: i64,
     pub market_id: i64,
     pub market_name: String,
     pub side: Side,
@@ -45,6 +46,7 @@ impl PlaceOrderIntent {
         ReservedPlaceOrder {
             input_id: None,
             envelope: self.envelope,
+            order_id: self.order_id,
             reservation_id,
             market_id: self.market_id,
             market_name: self.market_name,
@@ -245,6 +247,7 @@ mod tests {
                 user_id: 42,
                 reply_partition: 0,
             },
+            order_id: 99,
             market_id: 1,
             market_name: String::from("SOL-PERP"),
             side: Side::LONG,
@@ -260,6 +263,7 @@ mod tests {
         let order = intent.into_reserved_order(String::from("res-1"));
 
         assert_eq!(order.envelope.request_id, "req-1");
+        assert_eq!(order.order_id, 99);
         assert_eq!(order.reservation_id, "res-1");
         assert_eq!(order.market_id, 1);
         assert_eq!(order.quantity, 10);

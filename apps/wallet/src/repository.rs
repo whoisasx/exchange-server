@@ -361,37 +361,40 @@ impl WalletRepository {
 
         let debit_asset = asset_to_db(settle.debit_asset);
         let credit_asset = asset_to_db(settle.credit_asset);
+        let consumes_reserved_margin = is_same_asset_reservation_consumption(settle);
 
-        sqlx::query(
-            r#"
-            UPDATE user_collaterals
-            SET locked=locked-$3,
-                total=total-$3,
-                updated_at=NOW()
-            WHERE user_id=$1 AND asset=$2 AND locked >= $3 AND total >= $3
-            "#,
-        )
-        .bind(reservation.user_id)
-        .bind(debit_asset)
-        .bind(settle.debit_amount)
-        .execute(&mut *tx)
-        .await?;
+        if !consumes_reserved_margin {
+            sqlx::query(
+                r#"
+                UPDATE user_collaterals
+                SET locked=locked-$3,
+                    total=total-$3,
+                    updated_at=NOW()
+                WHERE user_id=$1 AND asset=$2 AND locked >= $3 AND total >= $3
+                "#,
+            )
+            .bind(reservation.user_id)
+            .bind(debit_asset)
+            .bind(settle.debit_amount)
+            .execute(&mut *tx)
+            .await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO user_collaterals(user_id, asset, total, locked)
-            VALUES($1,$2,$3,0)
-            ON CONFLICT(user_id, asset)
-            DO UPDATE
-            SET total=user_collaterals.total+EXCLUDED.total,
-                updated_at=NOW()
-            "#,
-        )
-        .bind(reservation.user_id)
-        .bind(credit_asset)
-        .bind(settle.credit_amount)
-        .execute(&mut *tx)
-        .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO user_collaterals(user_id, asset, total, locked)
+                VALUES($1,$2,$3,0)
+                ON CONFLICT(user_id, asset)
+                DO UPDATE
+                SET total=user_collaterals.total+EXCLUDED.total,
+                    updated_at=NOW()
+                "#,
+            )
+            .bind(reservation.user_id)
+            .bind(credit_asset)
+            .bind(settle.credit_amount)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         let reference_id = settle.fill_id.to_string();
         insert_ledger_in_tx(
@@ -669,6 +672,10 @@ pub fn asset_from_db(asset: AssetType) -> Asset {
     }
 }
 
+fn is_same_asset_reservation_consumption(settle: &SettleTrade) -> bool {
+    settle.debit_asset == settle.credit_asset && settle.debit_amount == settle.credit_amount
+}
+
 pub fn insufficient_funds_reply(
     request_id: String,
     asset: Asset,
@@ -686,9 +693,9 @@ pub fn insufficient_funds_reply(
 #[cfg(test)]
 mod tests {
     use db::dto::AssetType;
-    use protocol::common::Asset;
+    use protocol::{common::Asset, wallet::SettleTrade};
 
-    use super::{asset_from_db, asset_to_db};
+    use super::{asset_from_db, asset_to_db, is_same_asset_reservation_consumption};
 
     #[test]
     fn asset_mapping_round_trips_all_known_assets() {
@@ -707,5 +714,47 @@ mod tests {
         }
 
         assert_eq!(asset_from_db(AssetType::BTC), Asset::BTC);
+    }
+
+    #[test]
+    fn exact_same_asset_settlement_is_reserved_margin_consumption() {
+        let settle = SettleTrade {
+            fill_id: 7,
+            reservation_id: String::from("res-1"),
+            debit_asset: Asset::USDC,
+            debit_amount: 100,
+            credit_asset: Asset::USDC,
+            credit_amount: 100,
+        };
+
+        assert!(is_same_asset_reservation_consumption(&settle));
+    }
+
+    #[test]
+    fn cross_asset_settlement_keeps_spot_like_collateral_path() {
+        let settle = SettleTrade {
+            fill_id: 7,
+            reservation_id: String::from("res-1"),
+            debit_asset: Asset::USDC,
+            debit_amount: 100,
+            credit_asset: Asset::SOL,
+            credit_amount: 10,
+        };
+
+        assert!(!is_same_asset_reservation_consumption(&settle));
+    }
+
+    #[test]
+    fn same_asset_unequal_amount_settlement_keeps_spot_like_collateral_path() {
+        let settle = SettleTrade {
+            fill_id: 7,
+            reservation_id: String::from("res-1"),
+            debit_asset: Asset::USDC,
+            debit_amount: 100,
+            credit_asset: Asset::USDC,
+            credit_amount: 99,
+        };
+
+        assert!(!is_same_asset_reservation_consumption(&settle));
     }
 }

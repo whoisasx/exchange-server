@@ -805,6 +805,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-ingress"
+version = "0.1.0"
+dependencies = [
+ "dotenvy",
+ "protocol",
+ "serde_json",
+ "tokio",
+ "wallet",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

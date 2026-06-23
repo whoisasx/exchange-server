@@ -99,6 +99,11 @@ fn funds_released_entries(
 
 fn trade_settled_entries(event: &WalletTradeSettled) -> (&'static str, i64, Vec<LedgerEntryDraft>) {
     let reference_id = event.fill_id.to_string();
+    let locked_delta = if is_same_asset_reservation_consumption(event) {
+        0
+    } else {
+        -event.debit_amount
+    };
 
     (
         "TradeSettled",
@@ -109,7 +114,7 @@ fn trade_settled_entries(event: &WalletTradeSettled) -> (&'static str, i64, Vec<
                 asset: event.debit_asset,
                 kind: String::from("TRADE_DEBIT"),
                 total_delta: -event.debit_amount,
-                locked_delta: -event.debit_amount,
+                locked_delta,
                 reference_id: reference_id.clone(),
             },
             LedgerEntryDraft {
@@ -122,6 +127,10 @@ fn trade_settled_entries(event: &WalletTradeSettled) -> (&'static str, i64, Vec<
             },
         ],
     )
+}
+
+fn is_same_asset_reservation_consumption(event: &WalletTradeSettled) -> bool {
+    event.debit_asset == event.credit_asset && event.debit_amount == event.credit_amount
 }
 
 fn deposit_entries(event: &WalletDepositApplied) -> (&'static str, i64, Vec<LedgerEntryDraft>) {
@@ -283,6 +292,47 @@ mod tests {
         assert_eq!(record.entries[1].kind, "TRADE_CREDIT");
         assert_eq!(record.entries[1].total_delta, 10);
         assert_eq!(record.entries[1].locked_delta, 0);
+    }
+
+    #[test]
+    fn same_asset_trade_event_does_not_report_locked_decrease() {
+        let record =
+            ledger_record_from_wallet_event(&WalletEvent::TradeSettled(WalletTradeSettled {
+                user_id: 42,
+                fill_id: 7,
+                reservation_id: String::from("res-1"),
+                debit_asset: Asset::USDC,
+                debit_amount: 100,
+                credit_asset: Asset::USDC,
+                credit_amount: 100,
+            }))
+            .expect("trade should map");
+
+        assert_eq!(record.entries.len(), 2);
+        assert_eq!(record.entries[0].kind, "TRADE_DEBIT");
+        assert_eq!(record.entries[0].total_delta, -100);
+        assert_eq!(record.entries[0].locked_delta, 0);
+        assert_eq!(record.entries[1].kind, "TRADE_CREDIT");
+        assert_eq!(record.entries[1].total_delta, 100);
+        assert_eq!(record.entries[1].locked_delta, 0);
+    }
+
+    #[test]
+    fn same_asset_unequal_trade_event_keeps_spot_like_locked_decrease() {
+        let record =
+            ledger_record_from_wallet_event(&WalletEvent::TradeSettled(WalletTradeSettled {
+                user_id: 42,
+                fill_id: 7,
+                reservation_id: String::from("res-1"),
+                debit_asset: Asset::USDC,
+                debit_amount: 100,
+                credit_asset: Asset::USDC,
+                credit_amount: 99,
+            }))
+            .expect("trade should map");
+
+        assert_eq!(record.entries[0].kind, "TRADE_DEBIT");
+        assert_eq!(record.entries[0].locked_delta, -100);
     }
 
     #[test]

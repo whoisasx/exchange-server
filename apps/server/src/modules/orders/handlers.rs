@@ -11,7 +11,7 @@ use crate::{
         auth::dto::Claim,
         orders::{
             dto::{CancelOrder, PlaceOrder, PublicOpenOrder},
-            services::{get_all_open_orders, get_users_market_all_orders},
+            services::{allocate_order_id, get_all_open_orders, get_users_market_all_orders},
         },
     },
     protocol_map::{asset_to_protocol, order_type_to_protocol, side_to_protocol},
@@ -54,8 +54,16 @@ pub async fn place_order(req: HttpRequest, body: web::Json<PlaceOrder>) -> impl 
         Ok(reply_state) => reply_state,
         Err(response) => return response,
     };
+    let order_id = match allocate_order_id().await {
+        Ok(order_id) => order_id,
+        Err(error) => {
+            eprintln!("{error}");
+            return internal_server_error("failed to allocate order id");
+        }
+    };
     let command = WalletCommand::PlaceOrderIntent(PlaceOrderIntent {
         envelope: context.envelope,
+        order_id,
         market_id: order_data.market_id,
         market_name: validated_order.market_name,
         side: side_to_protocol(order_data.side),

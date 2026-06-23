@@ -8,6 +8,7 @@
       "user_id": 42,
       "reply_partition": 0
     },
+    "order_id": 9002,
     "reservation_id": "res_close_001",
     "market_id": 1,
     "market_name": "SOL-PERP",

@@ -459,6 +459,7 @@ mod tests {
                 user_id: 42,
                 reply_partition: 0,
             },
+            order_id: 99,
             market_id: 1,
             market_name: "SOL-PERP".to_string(),
             side: Side::LONG,
@@ -474,6 +475,7 @@ mod tests {
         let order = intent.into_reserved_order("res-1".to_string());
 
         assert_eq!(order.envelope.idempotency_key, "client-order-1");
+        assert_eq!(order.order_id, 99);
         assert_eq!(order.reservation_id, "res-1");
         assert!(order.reduce_only);
         assert_eq!(order.leverage, 2);

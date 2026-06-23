@@ -13,6 +13,7 @@ use crate::{
     },
     modules::{
         auth::dto::Claim,
+        orders::services::allocate_order_id,
         positions::services::{get_user_closed_positions, get_user_open_position},
     },
     protocol_map::asset_to_protocol,
@@ -169,9 +170,17 @@ pub async fn close_position(
         Ok(reply_state) => reply_state,
         Err(response) => return response,
     };
+    let order_id = match allocate_order_id().await {
+        Ok(order_id) => order_id,
+        Err(error) => {
+            eprintln!("{error}");
+            return internal_server_error("failed to allocate order id");
+        }
+    };
 
     let command = WalletCommand::PlaceOrderIntent(PlaceOrderIntent {
         envelope: context.envelope,
+        order_id,
         market_id: position.market_id,
         market_name: position.market_name,
         side: closing_side,
