@@ -50,6 +50,7 @@ struct Settings {
     server_url: String,
     ws_url: String,
     database_url: String,
+    mark_input_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,6 +417,11 @@ async fn main() -> Result<()> {
         &[SECONDARY_MARKET.id],
     )
     .await?;
+    if let Some(mark_input_id) = settings.mark_input_id.as_deref() {
+        wait_for_mark_ingress_outbox_published(&pool, mark_input_id).await?;
+    }
+    wait_for_wallet_outbox_drained(&pool).await?;
+    wait_for_wallet_ledger_logical_event_ids(&pool).await?;
 
     println!("e2e smoke passed");
     Ok(())
@@ -431,6 +437,7 @@ impl Settings {
             database_url: env::var("DATABASE_URL").unwrap_or_else(|_| {
                 String::from("postgres://postgres:postgres@127.0.0.1:55432/exchange")
             }),
+            mark_input_id: env::var("E2E_MARK_INPUT_ID").ok(),
         }
     }
 }
@@ -1281,6 +1288,95 @@ async fn wait_for_ledger_entries(pool: &Pool<Postgres>, alice: i64, bob: i64) ->
             && count_for("RESERVE") == 2
             && count_for("TRADE_DEBIT") == 2
             && count_for("TRADE_CREDIT") == 2)
+    })
+    .await
+}
+
+async fn wait_for_wallet_outbox_drained(pool: &Pool<Postgres>) -> Result<()> {
+    wait_for_db("wallet outbox drained", || async {
+        let row = sqlx::query(
+            r#"
+            SELECT
+              COUNT(*) FILTER (WHERE status <> 'PUBLISHED')::BIGINT AS unpublished,
+              COUNT(*) FILTER (WHERE topic='wallet.events' AND status='PUBLISHED')::BIGINT
+                AS published_wallet_events,
+              COUNT(*) FILTER (WHERE topic='engine.input' AND status='PUBLISHED')::BIGINT
+                AS published_engine_inputs
+            FROM wallet_outbox
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+
+        Ok(row.get::<i64, _>("unpublished") == 0
+            && row.get::<i64, _>("published_wallet_events") > 0
+            && row.get::<i64, _>("published_engine_inputs") > 0)
+    })
+    .await
+}
+
+async fn wait_for_mark_ingress_outbox_published(
+    pool: &Pool<Postgres>,
+    input_id: &str,
+) -> Result<()> {
+    let dedupe_key = format!("engine-input:mark-price:{input_id}");
+
+    wait_for_db("mark ingress outbox publication", || async {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM wallet_outbox
+            WHERE dedupe_key=$1
+              AND topic='engine.input'
+              AND payload_type='EngineCommand'
+              AND payload->>'type'='MarkPriceUpdated'
+              AND payload #>> '{payload,input_id}' = $2
+              AND status='PUBLISHED'
+            "#,
+        )
+        .bind(&dedupe_key)
+        .bind(input_id)
+        .fetch_one(pool)
+        .await?;
+
+        Ok(count == 1)
+    })
+    .await
+}
+
+async fn wait_for_wallet_ledger_logical_event_ids(pool: &Pool<Postgres>) -> Result<()> {
+    wait_for_db("wallet ledger logical event ids", || async {
+        let row = sqlx::query(
+            r#"
+            WITH outbox AS (
+              SELECT COUNT(*)::BIGINT AS published_wallet_events
+              FROM wallet_outbox
+              WHERE topic='wallet.events' AND status='PUBLISHED'
+            )
+            SELECT
+              COUNT(ledger_events.event_id)::BIGINT AS ledger_wallet_events,
+              COUNT(ledger_events.logical_event_id)::BIGINT AS ledger_wallet_events_with_id,
+              COUNT(DISTINCT ledger_events.logical_event_id)::BIGINT
+                AS distinct_ledger_wallet_event_ids,
+              outbox.published_wallet_events
+            FROM outbox
+            LEFT JOIN ledger_events ON ledger_events.topic='wallet.events'
+            GROUP BY outbox.published_wallet_events
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+
+        let published_wallet_events = row.get::<i64, _>("published_wallet_events");
+        let ledger_wallet_events = row.get::<i64, _>("ledger_wallet_events");
+        let ledger_wallet_events_with_id = row.get::<i64, _>("ledger_wallet_events_with_id");
+        let distinct_ledger_wallet_event_ids =
+            row.get::<i64, _>("distinct_ledger_wallet_event_ids");
+
+        Ok(published_wallet_events > 0
+            && ledger_wallet_events == published_wallet_events
+            && ledger_wallet_events_with_id == ledger_wallet_events
+            && distinct_ledger_wallet_event_ids == ledger_wallet_events)
     })
     .await
 }

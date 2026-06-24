@@ -1,6 +1,12 @@
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{
+    collections::{BTreeSet, HashSet, VecDeque},
+    error::Error,
+    fmt,
+    sync::Arc,
+};
 
 use protocol::{engine::EngineEvent, wallet::WalletEvent};
+use tokio::sync::Mutex;
 
 use crate::{
     hub::Hub,
@@ -8,6 +14,8 @@ use crate::{
         EventSource, ServerMessage, StreamMetadata, engine_event_value, wallet_event_value,
     },
 };
+
+const WALLET_EVENT_DEDUPE_CAPACITY: usize = 10_000;
 
 #[derive(Debug)]
 pub enum RouterError {
@@ -33,11 +41,17 @@ impl Error for RouterError {}
 #[derive(Clone)]
 pub struct EventRouter {
     hub: Hub,
+    wallet_event_dedupe: Arc<Mutex<EventDedupe>>,
 }
 
 impl EventRouter {
     pub fn new(hub: Hub) -> Self {
-        Self { hub }
+        Self {
+            hub,
+            wallet_event_dedupe: Arc::new(Mutex::new(EventDedupe::new(
+                WALLET_EVENT_DEDUPE_CAPACITY,
+            ))),
+        }
     }
 
     pub async fn process_engine_event(
@@ -77,6 +91,15 @@ impl EventRouter {
         event: WalletEvent,
         metadata: StreamMetadata,
     ) -> Result<(), RouterError> {
+        if self
+            .wallet_event_dedupe
+            .lock()
+            .await
+            .is_duplicate(event.event_id())
+        {
+            return Ok(());
+        }
+
         let event_value = wallet_event_value(&event)?;
         let user_id = wallet_event_user_id(&event);
 
@@ -108,6 +131,48 @@ impl EventRouter {
         let message = ServerMessage::market_event(market_id, source, event, metadata);
         self.hub.broadcast_market(market_id, &message).await?;
         Ok(())
+    }
+}
+
+struct EventDedupe {
+    capacity: usize,
+    order: VecDeque<String>,
+    seen: HashSet<String>,
+}
+
+impl EventDedupe {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            order: VecDeque::with_capacity(capacity),
+            seen: HashSet::with_capacity(capacity),
+        }
+    }
+
+    fn is_duplicate(&mut self, event_id: Option<&str>) -> bool {
+        let Some(event_id) = event_id.filter(|event_id| !event_id.is_empty()) else {
+            return false;
+        };
+
+        if self.seen.contains(event_id) {
+            return true;
+        }
+
+        if self.capacity == 0 {
+            return false;
+        }
+
+        let event_id = String::from(event_id);
+        self.seen.insert(event_id.clone());
+        self.order.push_back(event_id);
+
+        while self.order.len() > self.capacity {
+            if let Some(expired) = self.order.pop_front() {
+                self.seen.remove(&expired);
+            }
+        }
+
+        false
     }
 }
 
@@ -222,6 +287,27 @@ mod tests {
             trade_users(42, 42).into_iter().collect::<Vec<_>>(),
             vec![42]
         );
+    }
+
+    #[test]
+    fn event_dedupe_rejects_repeated_event_id() {
+        let mut dedupe = EventDedupe::new(10);
+
+        assert!(!dedupe.is_duplicate(Some("wallet-event-1")));
+        assert!(dedupe.is_duplicate(Some("wallet-event-1")));
+        assert!(!dedupe.is_duplicate(Some("wallet-event-2")));
+        assert!(!dedupe.is_duplicate(None));
+    }
+
+    #[test]
+    fn event_dedupe_expires_old_event_ids() {
+        let mut dedupe = EventDedupe::new(2);
+
+        assert!(!dedupe.is_duplicate(Some("wallet-event-1")));
+        assert!(!dedupe.is_duplicate(Some("wallet-event-2")));
+        assert!(!dedupe.is_duplicate(Some("wallet-event-3")));
+        assert!(!dedupe.is_duplicate(Some("wallet-event-1")));
+        assert!(dedupe.is_duplicate(Some("wallet-event-3")));
     }
 
     #[test]

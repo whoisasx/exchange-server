@@ -11,6 +11,16 @@ use protocol::{
 use serde_json::Value;
 use sqlx::{Pool, Postgres, Row};
 
+const SAVE_QUEUE_OFFSET_SQL: &str = r#"
+INSERT INTO projector_offsets(topic, partition, next_offset)
+VALUES($1,$2,$3)
+ON CONFLICT(topic, partition)
+DO UPDATE
+SET next_offset=EXCLUDED.next_offset,
+    updated_at=NOW()
+WHERE projector_offsets.next_offset < EXCLUDED.next_offset
+"#;
+
 #[derive(Debug)]
 pub enum ProjectorRepositoryError {
     MissingOrderContext {
@@ -900,21 +910,12 @@ async fn save_queue_offset_in_tx(
     partition: i32,
     next_offset: i64,
 ) -> Result<(), ProjectorRepositoryError> {
-    sqlx::query(
-        r#"
-        INSERT INTO projector_offsets(topic, partition, next_offset)
-        VALUES($1,$2,$3)
-        ON CONFLICT(topic, partition)
-        DO UPDATE
-        SET next_offset=EXCLUDED.next_offset,
-            updated_at=NOW()
-        "#,
-    )
-    .bind(topic)
-    .bind(partition)
-    .bind(next_offset)
-    .execute(&mut **tx)
-    .await?;
+    sqlx::query(SAVE_QUEUE_OFFSET_SQL)
+        .bind(topic)
+        .bind(partition)
+        .bind(next_offset)
+        .execute(&mut **tx)
+        .await?;
 
     Ok(())
 }
@@ -2122,6 +2123,17 @@ fn clamp_i128_to_i64(value: i128) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_offset_upsert_only_advances_offset() {
+        let sql = SAVE_QUEUE_OFFSET_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(sql.contains("ON CONFLICT(topic, partition) DO UPDATE"));
+        assert!(sql.contains("WHERE projector_offsets.next_offset < EXCLUDED.next_offset"));
+    }
 
     #[test]
     fn order_status_after_fill_marks_partial_before_target_quantity() {

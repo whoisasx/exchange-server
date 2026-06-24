@@ -25,11 +25,14 @@ All stream messages are JSON encoded with this shape:
 
 | Topic | Producer | Consumer | Purpose |
 | --- | --- | --- | --- |
-| `engine.input` | wallet / MVP engine ingress | C++ engine | Globally ordered engine-affecting inputs for orders, cancels, mark price, and funding. |
+| `engine.input` | wallet outbox relay | C++ engine | Globally ordered engine-affecting inputs for orders, cancels, mark price, and funding. |
 | `engine.replies` | C++ engine | server reply consumer | Request lifecycle replies only. |
 | `engine.events` | C++ engine | wallet, projector, websocket, ledger, timeseries | Durable engine facts and state changes. |
 
-For MVP, the wallet process is the engine ingress publisher because it already owns the hot-path reservation flow. Mark price and funding forwarding must stay isolated from wallet balance logic so this path can later move into a dedicated `engine-ingress` service.
+Wallet and `engine-ingress` enqueue engine-affecting inputs into
+`wallet_outbox`; the wallet outbox relay is the only Redpanda publisher for
+`engine.input`. Wallet owns the hot-path reservation flow for orders and
+cancels. `engine-ingress` owns pass-through mark price and funding inputs.
 
 ## Topic Provisioning
 

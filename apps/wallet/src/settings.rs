@@ -12,6 +12,11 @@ pub struct WalletSettings {
     pub wallet_events_topic: String,
     pub engine_commands_topic: String,
     pub engine_events_topic: String,
+    pub wallet_outbox_batch_limit: i64,
+    pub wallet_outbox_stale_after_seconds: i64,
+    pub wallet_outbox_metrics_interval_seconds: i64,
+    pub wallet_outbox_alert_pending_count: i64,
+    pub wallet_outbox_alert_oldest_pending_seconds: i64,
 }
 
 impl WalletSettings {
@@ -38,6 +43,23 @@ impl WalletSettings {
                 engine::ENGINE_INPUT_TOPIC,
             ),
             engine_events_topic: env_or_default("ENGINE_EVENTS_TOPIC", engine::ENGINE_EVENTS_TOPIC),
+            wallet_outbox_batch_limit: env_i64_or_default("WALLET_OUTBOX_BATCH_LIMIT", 100),
+            wallet_outbox_stale_after_seconds: env_i64_or_default(
+                "WALLET_OUTBOX_STALE_AFTER_SECONDS",
+                60,
+            ),
+            wallet_outbox_metrics_interval_seconds: env_i64_or_default(
+                "WALLET_OUTBOX_METRICS_INTERVAL_SECONDS",
+                30,
+            ),
+            wallet_outbox_alert_pending_count: env_i64_or_default(
+                "WALLET_OUTBOX_ALERT_PENDING_COUNT",
+                1_000,
+            ),
+            wallet_outbox_alert_oldest_pending_seconds: env_i64_or_default(
+                "WALLET_OUTBOX_ALERT_OLDEST_PENDING_SECONDS",
+                60,
+            ),
         }
     }
 }
@@ -50,6 +72,13 @@ fn env_or_default_with_legacy(key: &str, legacy_key: &str, default: &str) -> Str
     env::var(key)
         .or_else(|_| env::var(legacy_key))
         .unwrap_or_else(|_| String::from(default))
+}
+
+fn env_i64_or_default(key: &str, default: i64) -> i64 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(test)]

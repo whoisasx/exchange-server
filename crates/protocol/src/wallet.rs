@@ -169,8 +169,25 @@ pub enum WalletEvent {
     AccountDeltaApplied(WalletAccountDeltaApplied),
 }
 
+impl WalletEvent {
+    pub fn event_id(&self) -> Option<&str> {
+        let event_id = match self {
+            Self::FundsReserved(event) => event.event_id.as_deref(),
+            Self::FundsReleased(event) => event.event_id.as_deref(),
+            Self::TradeSettled(event) => event.event_id.as_deref(),
+            Self::DepositApplied(event) => event.event_id.as_deref(),
+            Self::WithdrawalApplied(event) => event.event_id.as_deref(),
+            Self::AccountDeltaApplied(event) => event.event_id.as_deref(),
+        };
+
+        event_id.filter(|event_id| !event_id.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletFundsReserved {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     pub request_id: String,
     pub user_id: i64,
     pub reservation_id: String,
@@ -180,6 +197,8 @@ pub struct WalletFundsReserved {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletFundsReleased {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     pub user_id: i64,
     pub reservation_id: String,
     pub asset: Asset,
@@ -189,6 +208,8 @@ pub struct WalletFundsReleased {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletTradeSettled {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     pub user_id: i64,
     pub fill_id: i64,
     pub reservation_id: String,
@@ -200,6 +221,8 @@ pub struct WalletTradeSettled {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletDepositApplied {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     pub request_id: String,
     pub user_id: i64,
     pub asset: Asset,
@@ -211,6 +234,8 @@ pub struct WalletDepositApplied {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletWithdrawalApplied {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     pub request_id: String,
     pub user_id: i64,
     pub asset: Asset,
@@ -222,6 +247,8 @@ pub struct WalletWithdrawalApplied {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletAccountDeltaApplied {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     pub user_id: i64,
     pub asset: Asset,
     pub total_delta: i64,
@@ -297,6 +324,7 @@ mod tests {
     #[test]
     fn wallet_event_funds_reserved_carries_user_id() {
         let event = WalletEvent::FundsReserved(WalletFundsReserved {
+            event_id: Some(String::from("wallet-event:funds-reserved:res-1")),
             request_id: String::from("req-1"),
             user_id: 42,
             reservation_id: String::from("res-1"),
@@ -306,13 +334,37 @@ mod tests {
         let value = serde_json::to_value(event).expect("event should serialize");
 
         assert_eq!(value["type"], "FundsReserved");
+        assert_eq!(
+            value["payload"]["event_id"],
+            "wallet-event:funds-reserved:res-1"
+        );
         assert_eq!(value["payload"]["user_id"], 42);
         assert_eq!(value["payload"]["reservation_id"], "res-1");
     }
 
     #[test]
+    fn wallet_event_id_is_optional_for_legacy_payloads() {
+        let event = serde_json::from_value::<WalletEvent>(serde_json::json!({
+            "type": "FundsReserved",
+            "payload": {
+                "request_id": "req-1",
+                "user_id": 42,
+                "reservation_id": "res-1",
+                "asset": "USDC",
+                "amount": 100
+            }
+        }))
+        .expect("legacy wallet event should deserialize");
+
+        assert_eq!(event.event_id(), None);
+    }
+
+    #[test]
     fn wallet_account_delta_event_carries_dynamic_kind_and_balance() {
         let event = WalletEvent::AccountDeltaApplied(WalletAccountDeltaApplied {
+            event_id: Some(String::from(
+                "wallet-event:account-delta-applied:TRADE_FEE:fill:7:fee:0:42:TAKER:42:USDC",
+            )),
             user_id: 42,
             asset: Asset::USDC,
             total_delta: -3,
@@ -325,6 +377,10 @@ mod tests {
         let value = serde_json::to_value(event).expect("event should serialize");
 
         assert_eq!(value["type"], "AccountDeltaApplied");
+        assert_eq!(
+            value["payload"]["event_id"],
+            "wallet-event:account-delta-applied:TRADE_FEE:fill:7:fee:0:42:TAKER:42:USDC"
+        );
         assert_eq!(value["payload"]["user_id"], 42);
         assert_eq!(value["payload"]["kind"], "TRADE_FEE");
         assert_eq!(value["payload"]["total_delta"], -3);

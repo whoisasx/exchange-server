@@ -9,6 +9,7 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerRecord {
+    pub logical_event_id: Option<String>,
     pub event_type: &'static str,
     pub user_id: i64,
     pub payload: Value,
@@ -45,6 +46,7 @@ pub fn ledger_record_from_wallet_event(
     event: &WalletEvent,
 ) -> Result<LedgerRecord, serde_json::Error> {
     let payload = serde_json::to_value(event)?;
+    let logical_event_id = event.event_id().map(String::from);
 
     let (event_type, user_id, entries) = match event {
         WalletEvent::FundsReserved(event) => funds_reserved_entries(event),
@@ -56,6 +58,7 @@ pub fn ledger_record_from_wallet_event(
     };
 
     Ok(LedgerRecord {
+        logical_event_id,
         event_type,
         user_id,
         payload,
@@ -99,11 +102,6 @@ fn funds_released_entries(
 
 fn trade_settled_entries(event: &WalletTradeSettled) -> (&'static str, i64, Vec<LedgerEntryDraft>) {
     let reference_id = event.fill_id.to_string();
-    let locked_delta = if is_same_asset_reservation_consumption(event) {
-        0
-    } else {
-        -event.debit_amount
-    };
 
     (
         "TradeSettled",
@@ -114,7 +112,7 @@ fn trade_settled_entries(event: &WalletTradeSettled) -> (&'static str, i64, Vec<
                 asset: event.debit_asset,
                 kind: String::from("TRADE_DEBIT"),
                 total_delta: -event.debit_amount,
-                locked_delta,
+                locked_delta: -event.debit_amount,
                 reference_id: reference_id.clone(),
             },
             LedgerEntryDraft {
@@ -127,10 +125,6 @@ fn trade_settled_entries(event: &WalletTradeSettled) -> (&'static str, i64, Vec<
             },
         ],
     )
-}
-
-fn is_same_asset_reservation_consumption(event: &WalletTradeSettled) -> bool {
-    event.debit_asset == event.credit_asset && event.debit_amount == event.credit_amount
 }
 
 fn deposit_entries(event: &WalletDepositApplied) -> (&'static str, i64, Vec<LedgerEntryDraft>) {
@@ -198,6 +192,7 @@ mod tests {
     fn deposit_event_maps_to_total_increase() {
         let record =
             ledger_record_from_wallet_event(&WalletEvent::DepositApplied(WalletDepositApplied {
+                event_id: Some(String::from("wallet-event:deposit-applied:42:deposit-1")),
                 request_id: String::from("req-1"),
                 user_id: 42,
                 asset: Asset::USDC,
@@ -209,6 +204,10 @@ mod tests {
             .expect("deposit should map");
 
         assert_eq!(record.event_type, "DepositApplied");
+        assert_eq!(
+            record.logical_event_id.as_deref(),
+            Some("wallet-event:deposit-applied:42:deposit-1")
+        );
         assert_eq!(record.user_id, 42);
         assert_eq!(record.entries[0].kind, "DEPOSIT");
         assert_eq!(record.entries[0].total_delta, 100);
@@ -220,6 +219,7 @@ mod tests {
     fn withdrawal_event_maps_to_total_decrease() {
         let record = ledger_record_from_wallet_event(&WalletEvent::WithdrawalApplied(
             WalletWithdrawalApplied {
+                event_id: None,
                 request_id: String::from("req-2"),
                 user_id: 42,
                 asset: Asset::USDC,
@@ -241,6 +241,7 @@ mod tests {
     fn reservation_event_maps_to_locked_increase() {
         let record =
             ledger_record_from_wallet_event(&WalletEvent::FundsReserved(WalletFundsReserved {
+                event_id: None,
                 request_id: String::from("req-3"),
                 user_id: 42,
                 reservation_id: String::from("res-1"),
@@ -259,6 +260,7 @@ mod tests {
     fn release_event_maps_to_locked_decrease() {
         let record =
             ledger_record_from_wallet_event(&WalletEvent::FundsReleased(WalletFundsReleased {
+                event_id: None,
                 user_id: 42,
                 reservation_id: String::from("res-1"),
                 asset: Asset::USDC,
@@ -275,6 +277,7 @@ mod tests {
     fn trade_event_maps_to_debit_and_credit_entries() {
         let record =
             ledger_record_from_wallet_event(&WalletEvent::TradeSettled(WalletTradeSettled {
+                event_id: None,
                 user_id: 42,
                 fill_id: 7,
                 reservation_id: String::from("res-1"),
@@ -295,9 +298,10 @@ mod tests {
     }
 
     #[test]
-    fn same_asset_trade_event_does_not_report_locked_decrease() {
+    fn same_asset_trade_event_reports_locked_decrease() {
         let record =
             ledger_record_from_wallet_event(&WalletEvent::TradeSettled(WalletTradeSettled {
+                event_id: None,
                 user_id: 42,
                 fill_id: 7,
                 reservation_id: String::from("res-1"),
@@ -311,7 +315,7 @@ mod tests {
         assert_eq!(record.entries.len(), 2);
         assert_eq!(record.entries[0].kind, "TRADE_DEBIT");
         assert_eq!(record.entries[0].total_delta, -100);
-        assert_eq!(record.entries[0].locked_delta, 0);
+        assert_eq!(record.entries[0].locked_delta, -100);
         assert_eq!(record.entries[1].kind, "TRADE_CREDIT");
         assert_eq!(record.entries[1].total_delta, 100);
         assert_eq!(record.entries[1].locked_delta, 0);
@@ -321,6 +325,7 @@ mod tests {
     fn same_asset_unequal_trade_event_keeps_spot_like_locked_decrease() {
         let record =
             ledger_record_from_wallet_event(&WalletEvent::TradeSettled(WalletTradeSettled {
+                event_id: None,
                 user_id: 42,
                 fill_id: 7,
                 reservation_id: String::from("res-1"),
@@ -339,6 +344,7 @@ mod tests {
     fn account_delta_event_maps_to_dynamic_kind_entry() {
         let record = ledger_record_from_wallet_event(&WalletEvent::AccountDeltaApplied(
             WalletAccountDeltaApplied {
+                event_id: None,
                 user_id: 42,
                 asset: Asset::USDC,
                 total_delta: -3,

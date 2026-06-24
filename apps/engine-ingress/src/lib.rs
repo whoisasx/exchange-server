@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 use protocol::engine::{
     EngineCommand, FundingRateUpdatedInput, FundingSettlementTickInput, MarkPriceUpdatedInput,
 };
+use wallet::{
+    engine_inputs::engine_command_outbox_message as wallet_engine_command_outbox_message,
+    repository::NewWalletOutboxMessage,
+};
 
 pub fn parse_engine_command_json(input: &str) -> Result<EngineCommand, String> {
     let command = serde_json::from_str::<EngineCommand>(input)
@@ -67,13 +71,62 @@ pub fn command_name(command: &EngineCommand) -> &'static str {
     }
 }
 
+pub fn engine_command_dedupe_key(command: &EngineCommand) -> Result<String, String> {
+    match command {
+        EngineCommand::MarkPriceUpdated(input) => Ok(input
+            .input_id
+            .as_ref()
+            .map(|input_id| format!("engine-input:mark-price:{input_id}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "engine-input:mark-price:{}:{}:{}",
+                    input.market_id, input.source_sequence, input.source_timestamp_ms
+                )
+            })),
+        EngineCommand::FundingRateUpdated(input) => Ok(input
+            .input_id
+            .as_ref()
+            .map(|input_id| format!("engine-input:funding-rate:{input_id}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "engine-input:funding-rate:{}:{}:{}",
+                    input.market_id, input.funding_interval_id, input.source_timestamp_ms
+                )
+            })),
+        EngineCommand::FundingSettlementTick(input) => Ok(input
+            .input_id
+            .as_ref()
+            .map(|input_id| format!("engine-input:funding-settlement-tick:{input_id}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "engine-input:funding-settlement-tick:{}:{}:{}",
+                    input.market_id, input.funding_interval_id, input.settle_at_ms
+                )
+            })),
+        other => Err(format!(
+            "unsupported engine input '{}'; engine-ingress only queues mark/funding inputs",
+            command_name(other)
+        )),
+    }
+}
+
+pub fn engine_command_outbox_message(
+    command: &EngineCommand,
+    topic: &str,
+) -> Result<NewWalletOutboxMessage, String> {
+    let dedupe_key = engine_command_dedupe_key(command)?;
+
+    wallet_engine_command_outbox_message(topic, dedupe_key, command)
+        .map_err(|error| format!("failed to serialize engine input: {error:?}"))
+}
+
 fn ensure_supported(command: EngineCommand) -> Result<EngineCommand, String> {
     match command {
         EngineCommand::MarkPriceUpdated(_)
         | EngineCommand::FundingRateUpdated(_)
         | EngineCommand::FundingSettlementTick(_) => Ok(command),
         other => Err(format!(
-            "unsupported engine input '{}'; engine-ingress only publishes mark/funding inputs",
+            "unsupported engine input '{}'; engine-ingress only queues mark/funding inputs",
             command_name(&other)
         )),
     }
@@ -226,6 +279,67 @@ mod tests {
         )
         .expect_err("order commands are outside this ingress path");
 
-        assert!(error.contains("only publishes mark/funding inputs"));
+        assert!(error.contains("only queues mark/funding inputs"));
+    }
+
+    #[test]
+    fn mark_price_dedupe_key_uses_input_id_when_present() {
+        let command = EngineCommand::MarkPriceUpdated(MarkPriceUpdatedInput {
+            input_id: Some(String::from("mark-001")),
+            market_id: 1,
+            mark_price: 100,
+            index_price: 99,
+            source_timestamp_ms: 1_710_000_000_000,
+            published_at_ms: 1_710_000_000_100,
+            valid_until_ms: 1_710_000_005_100,
+            source_sequence: 45_001,
+            source_status: String::from("VALID"),
+        });
+
+        assert_eq!(
+            engine_command_dedupe_key(&command).expect("dedupe key should build"),
+            "engine-input:mark-price:mark-001"
+        );
+    }
+
+    #[test]
+    fn funding_rate_dedupe_key_uses_source_identity_without_input_id() {
+        let command = EngineCommand::FundingRateUpdated(FundingRateUpdatedInput {
+            input_id: None,
+            market_id: 1,
+            funding_interval_id: String::from("funding_SOL-PERP_1710000000_1710028800"),
+            rate: 25,
+            rate_scale: 1_000_000,
+            interval_start_ms: 1_710_000_000_000,
+            interval_end_ms: 1_710_028_800_000,
+            source_timestamp_ms: 1_710_000_001_000,
+        });
+
+        assert_eq!(
+            engine_command_dedupe_key(&command).expect("dedupe key should build"),
+            "engine-input:funding-rate:1:funding_SOL-PERP_1710000000_1710028800:1710000001000"
+        );
+    }
+
+    #[test]
+    fn outbox_message_targets_engine_input_topic() {
+        let command = EngineCommand::FundingSettlementTick(FundingSettlementTickInput {
+            input_id: Some(String::from("settle-001")),
+            market_id: 1,
+            funding_interval_id: String::from("funding_SOL-PERP_1710000000_1710028800"),
+            settle_at_ms: 1_710_028_800_000,
+        });
+
+        let message = engine_command_outbox_message(&command, "engine.input")
+            .expect("outbox message should serialize");
+
+        assert_eq!(
+            message.dedupe_key,
+            "engine-input:funding-settlement-tick:settle-001"
+        );
+        assert_eq!(message.topic, "engine.input");
+        assert_eq!(message.message_key, "settle-001");
+        assert_eq!(message.payload_type, "EngineCommand");
+        assert_eq!(message.payload["type"], "FundingSettlementTick");
     }
 }

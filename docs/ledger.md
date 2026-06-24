@@ -12,7 +12,9 @@ cargo run -p ledger
 The wallet remains the hot-path balance owner. It owns deposits, withdrawals,
 balances, locked funds, and reservations. When engine events move money, wallet
 applies the resulting account deltas, releases, fees, funding payments, and
-liquidation or ADL settlements, then emits wallet events for ledger to record.
+liquidation or ADL settlements, then enqueues wallet events in `wallet_outbox`.
+The wallet outbox relay publishes those events to `wallet.events` for ledger to
+record.
 
 Engine events are audit context only for ledger. They may be referenced from
 wallet events, but they are not accounting facts on their own. Wallet and engine
@@ -24,6 +26,10 @@ Ledger v1 does not replace wallet writes; it mirrors wallet events into:
 - `ledger_entries`: normalized balance deltas derived from each event.
 - `ledger_offsets`: consumed Redpanda offsets.
 
+For outbox-backed wallet events, `ledger_events.logical_event_id` stores the
+event payload `event_id` and has a unique index. Replayed publishes of the same
+logical wallet event are skipped while the ledger offset still advances.
+
 The full wallet event schema is in `docs/wallet-events.md`.
 
 Entry mapping:
@@ -34,7 +40,7 @@ Entry mapping:
 | `WithdrawalApplied` | `WITHDRAWAL`: `total_delta=-amount`, `locked_delta=0` |
 | `FundsReserved` | `RESERVE`: `total_delta=0`, `locked_delta=+amount` |
 | `FundsReleased` | `RELEASE`: `total_delta=0`, `locked_delta=-amount` |
-| `TradeSettled` | `TRADE_DEBIT`: `total_delta=-debit_amount`, `locked_delta=0` for exact same-asset reservation consumption, otherwise `locked_delta=-debit_amount`; `TRADE_CREDIT`: `total_delta=+credit_amount`, `locked_delta=0` |
+| `TradeSettled` | `TRADE_DEBIT`: `total_delta=-debit_amount`, `locked_delta=-debit_amount`; `TRADE_CREDIT`: `total_delta=+credit_amount`, `locked_delta=0` |
 | `AccountDeltaApplied` | `<kind>`: `total_delta=total_delta`, `locked_delta=locked_delta` |
 
 Ledger starts from stored offsets, or earliest offsets when no offset is stored.

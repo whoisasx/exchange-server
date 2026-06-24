@@ -54,6 +54,10 @@ impl WalletWorker {
         &self.settings
     }
 
+    pub(crate) fn repository(&self) -> WalletRepository {
+        self.repository.clone()
+    }
+
     pub async fn process_command(
         &self,
         command: WalletCommand,

@@ -1,6 +1,8 @@
 # Engine System Plan
 
-This plan describes the intended engine flow before the external C++ engine is built. The Rust workspace keeps the API, wallet, projector, websocket, ledger, timeseries, and contract fixtures. The engine owns matching and market risk.
+This plan describes the exchange flow with the C++ engine wired as the matching
+and market-risk owner. The Rust workspace keeps the API, wallet, projector,
+websocket, ledger, timeseries, and ingress services.
 
 ## Decisions
 
@@ -8,7 +10,9 @@ This plan describes the intended engine flow before the external C++ engine is b
 - Margin mode is isolated per `user_id + market_id`.
 - All engine-affecting inputs must enter one ordered engine input log.
 - The engine input log is not partitioned by market for MVP. The dispatcher reads it in order and routes each input to the owning market thread.
-- Wallet is the MVP publisher into the engine input log, but mark price and funding are pass-through ingress concerns, not wallet balance logic.
+- The wallet outbox relay is the publisher into the engine input log. Wallet
+  enqueues order/cancel inputs after collateral checks; `engine-ingress`
+  enqueues mark price and funding inputs.
 - Mark price is a separate ordered input, not attached to every user order.
 - Funding rate is a separate ordered input, sent on the funding cadence.
 - Liquidation runs after trades, mark updates, funding settlement, and startup restore.
@@ -21,6 +25,8 @@ This plan describes the intended engine flow before the external C++ engine is b
 API servers
   -> wallet.commands
   -> wallet / engine-ingress
+  -> wallet_outbox
+  -> wallet outbox relay
   -> engine.input
   -> engine dispatcher
   -> market threads
@@ -62,11 +68,10 @@ It should:
 - deduplicate wallet commands
 - reserve collateral for valid `PlaceOrderIntent` commands
 - reject insufficient-fund requests before engine ingress
-- forward reserved orders to `engine.input`
-- forward cancel requests to `engine.input`
-- forward mark price and funding inputs as MVP engine ingress
+- enqueue reserved orders to `wallet_outbox` for `engine.input`
+- enqueue cancel requests to `wallet_outbox` for `engine.input`
 - apply engine-originated account deltas, releases, fees, trade settlement, and funding settlement
-- emit `wallet.events` as the accounting source consumed by ledger
+- enqueue wallet events in `wallet_outbox`; the wallet relay publishes them to `wallet.events` as the accounting source consumed by ledger
 
 It should not:
 
@@ -79,7 +84,10 @@ It should not:
 - own reduce-only enforcement
 - own matching, fees, or PnL calculation
 
-For MVP, the wallet process may publish mark and funding inputs because it already publishes to the engine queue. That forwarding path should remain isolated from balance logic so it can later move into a dedicated `engine-ingress` service.
+`engine-ingress` is the durable mark/funding ingress. It parses trusted
+mark-price, funding-rate, and funding-settlement inputs, writes an idempotent
+`wallet_outbox` row targeting `engine.input`, and leaves Redpanda publishing to
+the wallet outbox relay.
 
 ## Engine Inputs
 
@@ -356,7 +364,7 @@ For MVP, queue retention remains 30 minutes. The engine must fail loudly if it c
 ### Mark Update
 
 ```text
-wallet/ingress -> engine.input:
+wallet/engine-ingress -> wallet_outbox -> engine.input:
 MarkPriceUpdated {
   market_id: 1,
   mark_price: 100,
@@ -406,7 +414,7 @@ FundsReserved {
 Wallet forwards the reserved order.
 
 ```text
-wallet/ingress -> engine.input:
+wallet/engine-ingress -> wallet_outbox -> engine.input:
 PlaceOrder {
   reservation_id: "res_1",
   market_id: 1,
@@ -446,7 +454,7 @@ OrderBookDelta {
 ### Mark Drops And Liquidation Runs
 
 ```text
-wallet/ingress -> engine.input:
+wallet/engine-ingress -> wallet_outbox -> engine.input:
 MarkPriceUpdated {
   market_id: 1,
   mark_price: 80,

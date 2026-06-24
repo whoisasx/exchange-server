@@ -3,6 +3,16 @@ use sqlx::{Pool, Postgres, Row};
 
 use crate::processor::CandleDraft;
 
+const SAVE_QUEUE_OFFSET_SQL: &str = r#"
+INSERT INTO timeseries_offsets(topic, partition, next_offset)
+VALUES($1,$2,$3)
+ON CONFLICT(topic, partition)
+DO UPDATE
+SET next_offset=EXCLUDED.next_offset,
+    updated_at=NOW()
+WHERE timeseries_offsets.next_offset < EXCLUDED.next_offset
+"#;
+
 #[derive(Debug)]
 pub enum TimeseriesRepositoryError {
     Storage(sqlx::Error),
@@ -119,23 +129,30 @@ async fn save_queue_offset_in_tx(
     partition: i32,
     next_offset: i64,
 ) -> Result<(), TimeseriesRepositoryError> {
-    sqlx::query(
-        r#"
-        INSERT INTO timeseries_offsets(topic, partition, next_offset)
-        VALUES($1,$2,$3)
-        ON CONFLICT(topic, partition)
-        DO UPDATE
-        SET next_offset=EXCLUDED.next_offset,
-            updated_at=NOW()
-        "#,
-    )
-    .bind(topic)
-    .bind(partition)
-    .bind(next_offset)
-    .execute(&mut **tx)
-    .await?;
+    sqlx::query(SAVE_QUEUE_OFFSET_SQL)
+        .bind(topic)
+        .bind(partition)
+        .bind(next_offset)
+        .execute(&mut **tx)
+        .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SAVE_QUEUE_OFFSET_SQL;
+
+    #[test]
+    fn queue_offset_upsert_only_advances_offset() {
+        let sql = SAVE_QUEUE_OFFSET_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(sql.contains("ON CONFLICT(topic, partition) DO UPDATE"));
+        assert!(sql.contains("WHERE timeseries_offsets.next_offset < EXCLUDED.next_offset"));
+    }
 }
 
 async fn upsert_candle_in_tx(

@@ -808,9 +808,11 @@ dependencies = [
 name = "engine-ingress"
 version = "0.1.0"
 dependencies = [
+ "db",
  "dotenvy",
  "protocol",
  "serde_json",
+ "sqlx",
  "tokio",
  "wallet",
 ]
@@ -850,19 +852,6 @@ dependencies = [
  "concurrent-queue",
  "parking",
  "pin-project-lite",
-]
-
-[[package]]
-name = "fake-engine"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dotenvy",
- "protocol",
- "rskafka",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

@@ -1,8 +1,12 @@
 use std::io::Read;
 
-use engine_ingress::{command_name, parse_engine_command_args, parse_engine_command_json};
-use protocol::engine::EngineCommand;
-use wallet::{redpanda::WalletEngineInputPublisher, settings::WalletSettings};
+use db::pool::{init_pool, run_migration};
+use engine_ingress::{
+    command_name, engine_command_outbox_message, parse_engine_command_args,
+    parse_engine_command_json,
+};
+use sqlx::postgres::PgPoolOptions;
+use wallet::{repository::WalletRepository, settings::WalletSettings};
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
@@ -27,39 +31,36 @@ async fn main() -> Result<(), String> {
 
     let command_name = command_name(&command);
     let settings = WalletSettings::from_env();
-    let publisher = WalletEngineInputPublisher::new(&settings)
-        .await
-        .map_err(|error| error.to_string())?;
-    publish_command(&publisher, command).await?;
+    let outbox_message = engine_command_outbox_message(&command, &settings.engine_commands_topic)?;
+    let dedupe_key = outbox_message.dedupe_key.clone();
 
-    println!(
-        "published {command_name} to '{}'",
-        settings.engine_commands_topic
-    );
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&settings.database_url)
+        .await
+        .map_err(|error| format!("failed to connect to database: {error}"))?;
+    init_pool(pool.clone());
+    run_migration()
+        .await
+        .map_err(|error| format!("failed to run database migrations: {error}"))?;
+
+    let repository = WalletRepository::new(pool);
+    let outbox_id = repository
+        .enqueue_outbox_message(&outbox_message)
+        .await
+        .map_err(|error| format!("failed to enqueue wallet outbox message: {error:?}"))?;
+
+    if let Some(outbox_id) = outbox_id {
+        println!(
+            "queued {command_name} to wallet_outbox row {outbox_id} for '{}'",
+            settings.engine_commands_topic
+        );
+    } else {
+        println!(
+            "engine input already queued for dedupe key '{dedupe_key}' on '{}'",
+            settings.engine_commands_topic
+        );
+    }
 
     Ok(())
-}
-
-async fn publish_command(
-    publisher: &WalletEngineInputPublisher,
-    command: EngineCommand,
-) -> Result<(), String> {
-    match command {
-        EngineCommand::MarkPriceUpdated(input) => publisher
-            .publish_mark_price_updated(input)
-            .await
-            .map_err(|error| error.to_string()),
-        EngineCommand::FundingRateUpdated(input) => publisher
-            .publish_funding_rate_updated(input)
-            .await
-            .map_err(|error| error.to_string()),
-        EngineCommand::FundingSettlementTick(input) => publisher
-            .publish_funding_settlement_tick(input)
-            .await
-            .map_err(|error| error.to_string()),
-        other => Err(format!(
-            "unsupported engine input '{}'; engine-ingress only publishes mark/funding inputs",
-            command_name(&other)
-        )),
-    }
 }

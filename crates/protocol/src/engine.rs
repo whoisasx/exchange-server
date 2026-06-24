@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Asset, CommandEnvelope, OrderType, Side};
+use crate::common::{Asset, CommandEnvelope, OrderType, PositionSide, Side};
 
 pub const ENGINE_INPUT_TOPIC: &str = "engine.input";
 pub const ENGINE_COMMANDS_TOPIC: &str = ENGINE_INPUT_TOPIC;
@@ -429,7 +429,7 @@ pub struct FundingPaymentApplied {
 pub struct FundingPayment {
     pub user_id: i64,
     pub position_id: String,
-    pub side: Side,
+    pub side: PositionSide,
     pub asset: Asset,
     pub amount: i64,
 }
@@ -447,7 +447,7 @@ pub struct PositionChanged {
     pub source_input_offset: Option<i64>,
     pub user_id: i64,
     pub position_id: String,
-    pub side: Side,
+    pub side: PositionSide,
     pub quantity: i64,
     pub entry_price: i64,
     pub mark_price: i64,

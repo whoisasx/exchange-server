@@ -2,6 +2,8 @@ use protocol::engine::{
     EngineCommand, FundingRateUpdatedInput, FundingSettlementTickInput, MarkPriceUpdatedInput,
 };
 
+use crate::repository::{NewWalletOutboxMessage, WalletRepositoryError};
+
 pub const DEFAULT_ENGINE_INPUT_KEY: &str = "engine-input";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +54,23 @@ pub fn engine_input_key(input: &EngineCommand) -> String {
         EngineCommand::FundingRateUpdated(command) => input_key(&command.input_id),
         EngineCommand::FundingSettlementTick(command) => input_key(&command.input_id),
     }
+}
+
+pub fn engine_command_outbox_message(
+    topic: &str,
+    dedupe_key: impl Into<String>,
+    command: &EngineCommand,
+) -> Result<NewWalletOutboxMessage, WalletRepositoryError> {
+    let publication = EngineInputPublication::new(command.clone());
+
+    NewWalletOutboxMessage::json(
+        dedupe_key,
+        topic,
+        None,
+        publication.key(),
+        "EngineCommand",
+        publication.input(),
+    )
 }
 
 fn input_key(input_id: &Option<String>) -> String {
@@ -135,5 +154,29 @@ mod tests {
             });
 
         assert_eq!(publication.key(), DEFAULT_ENGINE_INPUT_KEY);
+    }
+
+    #[test]
+    fn engine_command_outbox_message_wraps_command_payload() {
+        let command = EngineCommand::FundingSettlementTick(FundingSettlementTickInput {
+            input_id: Some(String::from("input_funding_settle_001")),
+            market_id: 1,
+            funding_interval_id: String::from("funding_SOL-PERP_1710000000_1710028800"),
+            settle_at_ms: 1_710_028_800_000,
+        });
+
+        let message = engine_command_outbox_message(
+            "engine.input",
+            "engine-input:funding:settle-1",
+            &command,
+        )
+        .expect("engine command outbox payload should serialize");
+
+        assert_eq!(message.dedupe_key, "engine-input:funding:settle-1");
+        assert_eq!(message.topic, "engine.input");
+        assert_eq!(message.partition, None);
+        assert_eq!(message.message_key, "input_funding_settle_001");
+        assert_eq!(message.payload_type, "EngineCommand");
+        assert_eq!(message.payload["type"], "FundingSettlementTick");
     }
 }

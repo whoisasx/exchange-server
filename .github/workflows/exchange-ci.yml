@@ -1,0 +1,55 @@
+name: Exchange CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CPP_ENGINE_REPOSITORY: ${{ vars.CPP_ENGINE_REPOSITORY || 'whoisasx/exchange-engine' }}
+
+jobs:
+  fmt-test-smoke:
+    name: fmt, test, smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout C++ engine
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CPP_ENGINE_REPOSITORY }}
+          path: engine
+
+      - name: Install C++ engine dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake librdkafka-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+      - name: Check Docker Compose
+        run: docker compose version
+
+      - name: Run e2e smoke
+        env:
+          E2E_CPP_ENGINE_DIR: ${{ github.workspace }}/engine
+        run: scripts/e2e-smoke.sh

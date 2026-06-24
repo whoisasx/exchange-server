@@ -2,9 +2,7 @@ use std::{collections::BTreeMap, fmt, ops::Range, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use protocol::{
-    engine::{
-        EngineEvent, FundingRateUpdatedInput, FundingSettlementTickInput, MarkPriceUpdatedInput,
-    },
+    engine::EngineEvent,
     wallet::{ReleaseReservation, SettleTrade, WalletCommand},
 };
 use rskafka::{
@@ -21,11 +19,11 @@ use rskafka::{
     topic::Topic,
 };
 use serde::Serialize;
-use tokio::task::JoinSet;
+use tokio::{task::JoinSet, time::Instant};
 
 use crate::{
-    engine_inputs::EngineInputPublication,
     processor::{ApplyAccountDelta, EngineWalletCommand},
+    repository::{WalletOutboxMessage, WalletRepository},
     settings::WalletSettings,
     worker::WalletWorker,
 };
@@ -34,56 +32,6 @@ const FETCH_BYTES: Range<i32> = 1..52_428_800;
 const FETCH_MAX_WAIT_MS: i32 = 500;
 const IDLE_SLEEP: Duration = Duration::from_millis(100);
 const PRODUCER_BATCH_BYTES: usize = 1024 * 1024;
-
-#[derive(Clone)]
-pub struct WalletEngineInputPublisher {
-    engine_inputs: TopicProducer,
-}
-
-impl WalletEngineInputPublisher {
-    pub async fn new(settings: &WalletSettings) -> Result<Self, QueueError> {
-        let brokers = parse_brokers(&settings.redpanda_brokers)?;
-        let client = ClientBuilder::new(brokers)
-            .client_id("exchange-wallet-engine-input-publisher")
-            .build()
-            .await?;
-        let topics = client.list_topics().await?;
-        let engine_inputs =
-            TopicProducer::new(&client, &topics, settings.engine_commands_topic.clone()).await?;
-
-        Ok(Self { engine_inputs })
-    }
-
-    pub async fn publish_mark_price_updated(
-        &self,
-        input: MarkPriceUpdatedInput,
-    ) -> Result<(), QueueError> {
-        self.publish(EngineInputPublication::mark_price_updated(input))
-            .await
-    }
-
-    pub async fn publish_funding_rate_updated(
-        &self,
-        input: FundingRateUpdatedInput,
-    ) -> Result<(), QueueError> {
-        self.publish(EngineInputPublication::funding_rate_updated(input))
-            .await
-    }
-
-    pub async fn publish_funding_settlement_tick(
-        &self,
-        input: FundingSettlementTickInput,
-    ) -> Result<(), QueueError> {
-        self.publish(EngineInputPublication::funding_settlement_tick(input))
-            .await
-    }
-
-    pub async fn publish(&self, publication: EngineInputPublication) -> Result<(), QueueError> {
-        self.engine_inputs
-            .publish_json(publication.key(), publication.input())
-            .await
-    }
-}
 
 pub struct WalletQueue {
     wallet_commands_topic: String,
@@ -113,18 +61,6 @@ impl WalletQueue {
                 settings.wallet_replies_topic.clone(),
             )
             .await?,
-            wallet_events: TopicProducer::new(
-                &client,
-                &topics,
-                settings.wallet_events_topic.clone(),
-            )
-            .await?,
-            engine_commands: TopicProducer::new(
-                &client,
-                &topics,
-                settings.engine_commands_topic.clone(),
-            )
-            .await?,
         };
 
         Ok(Self {
@@ -138,6 +74,10 @@ impl WalletQueue {
 
     pub async fn run(self, worker: WalletWorker) -> Result<(), QueueError> {
         let mut tasks = JoinSet::new();
+        let relay_settings = worker.settings().clone();
+        let relay = WalletOutboxRelay::new(&relay_settings, worker.repository()).await?;
+
+        tasks.spawn(async move { relay.run().await });
 
         for partition_client in self.command_partitions {
             let topic = self.wallet_commands_topic.clone();
@@ -168,6 +108,159 @@ impl WalletQueue {
         }
 
         Ok(())
+    }
+}
+
+struct WalletOutboxRelay {
+    repository: WalletRepository,
+    wallet_events_topic: String,
+    wallet_events: TopicProducer,
+    engine_commands_topic: String,
+    engine_commands: TopicProducer,
+    batch_limit: i64,
+    stale_after_seconds: i64,
+    metrics_interval: Duration,
+    alert_pending_count: i64,
+    alert_oldest_pending_seconds: i64,
+}
+
+impl WalletOutboxRelay {
+    async fn new(
+        settings: &WalletSettings,
+        repository: WalletRepository,
+    ) -> Result<Self, QueueError> {
+        let brokers = parse_brokers(&settings.redpanda_brokers)?;
+        let client = ClientBuilder::new(brokers)
+            .client_id("exchange-wallet-outbox-relay")
+            .build()
+            .await?;
+        let topics = client.list_topics().await?;
+        let wallet_events =
+            TopicProducer::new(&client, &topics, settings.wallet_events_topic.clone()).await?;
+        let engine_commands =
+            TopicProducer::new(&client, &topics, settings.engine_commands_topic.clone()).await?;
+
+        Ok(Self {
+            repository,
+            wallet_events_topic: settings.wallet_events_topic.clone(),
+            wallet_events,
+            engine_commands_topic: settings.engine_commands_topic.clone(),
+            engine_commands,
+            batch_limit: settings.wallet_outbox_batch_limit.max(1),
+            stale_after_seconds: settings.wallet_outbox_stale_after_seconds.max(1),
+            metrics_interval: Duration::from_secs(
+                settings.wallet_outbox_metrics_interval_seconds.max(1) as u64,
+            ),
+            alert_pending_count: settings.wallet_outbox_alert_pending_count.max(1),
+            alert_oldest_pending_seconds: settings
+                .wallet_outbox_alert_oldest_pending_seconds
+                .max(1),
+        })
+    }
+
+    async fn run(self) -> Result<(), QueueError> {
+        println!(
+            "wallet outbox relay publishing '{}' and '{}'",
+            self.wallet_events_topic, self.engine_commands_topic
+        );
+
+        let mut next_metrics_at = Instant::now();
+
+        loop {
+            self.emit_metrics_if_due(&mut next_metrics_at).await?;
+
+            self.repository
+                .requeue_stale_outbox_messages(self.stale_after_seconds)
+                .await?;
+
+            let messages = self
+                .repository
+                .claim_outbox_messages(self.batch_limit)
+                .await?;
+            if messages.is_empty() {
+                tokio::time::sleep(IDLE_SLEEP).await;
+                continue;
+            }
+
+            for message in messages {
+                if let Err(error) = self.publish_message(&message).await {
+                    let error_message = error.to_string();
+                    eprintln!(
+                        "wallet outbox publish failed for row {}: {}",
+                        message.outbox_id, error_message
+                    );
+                    self.repository
+                        .mark_outbox_pending(message.outbox_id, &error_message)
+                        .await?;
+                    continue;
+                }
+
+                self.repository
+                    .mark_outbox_published(message.outbox_id)
+                    .await?;
+            }
+        }
+    }
+
+    async fn emit_metrics_if_due(&self, next_metrics_at: &mut Instant) -> Result<(), QueueError> {
+        let now = Instant::now();
+        if now < *next_metrics_at {
+            return Ok(());
+        }
+        *next_metrics_at = now + self.metrics_interval;
+
+        let metrics = self.repository.load_outbox_metrics().await?;
+        let oldest_pending_age_seconds = metrics.oldest_pending_age_seconds.unwrap_or(0);
+
+        println!(
+            "wallet outbox metrics pending={} ready={} processing={} published={} retrying={} max_unpublished_attempts={} oldest_pending_age_seconds={}",
+            metrics.pending_count,
+            metrics.ready_count,
+            metrics.processing_count,
+            metrics.published_count,
+            metrics.retry_count,
+            metrics.max_unpublished_attempts,
+            oldest_pending_age_seconds
+        );
+
+        if metrics.pending_count >= self.alert_pending_count
+            || oldest_pending_age_seconds >= self.alert_oldest_pending_seconds
+        {
+            eprintln!(
+                "wallet outbox alert pending={} threshold={} oldest_pending_age_seconds={} threshold={}",
+                metrics.pending_count,
+                self.alert_pending_count,
+                oldest_pending_age_seconds,
+                self.alert_oldest_pending_seconds
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn publish_message(&self, message: &WalletOutboxMessage) -> Result<(), QueueError> {
+        let producer = self.producer_for_topic(&message.topic)?;
+
+        if let Some(partition) = message.partition {
+            producer
+                .publish_json_to_partition(partition, &message.message_key, &message.payload)
+                .await
+        } else {
+            producer
+                .publish_json(&message.message_key, &message.payload)
+                .await
+        }
+    }
+
+    fn producer_for_topic(&self, topic: &str) -> Result<&TopicProducer, QueueError> {
+        if topic == self.wallet_events_topic {
+            return Ok(&self.wallet_events);
+        }
+        if topic == self.engine_commands_topic {
+            return Ok(&self.engine_commands);
+        }
+
+        Err(QueueError::OutboxTopicNotConfigured(String::from(topic)))
     }
 }
 
@@ -301,8 +394,6 @@ async fn run_engine_event_partition(
 #[derive(Clone)]
 struct WalletPublishers {
     wallet_replies: TopicProducer,
-    wallet_events: TopicProducer,
-    engine_commands: TopicProducer,
 }
 
 impl WalletPublishers {
@@ -317,19 +408,6 @@ impl WalletPublishers {
             };
             self.wallet_replies
                 .publish_json_to_partition(reply_partition, &metadata.reply_key, &reply)
-                .await?;
-        }
-
-        for event in result.wallet_events {
-            self.wallet_events
-                .publish_json(&metadata.wallet_key, &event)
-                .await?;
-        }
-
-        for command in result.engine_commands {
-            let publication = EngineInputPublication::new(command);
-            self.engine_commands
-                .publish_json(publication.key(), publication.input())
                 .await?;
         }
 
@@ -485,6 +563,7 @@ pub enum QueueError {
     Client(ClientError),
     EmptyBrokerList,
     MissingReplyPartition(String),
+    OutboxTopicNotConfigured(String),
     PartitionNotFound { topic: String, partition: i32 },
     Producer(ProducerError),
     Repository(String),
@@ -521,11 +600,14 @@ impl fmt::Display for QueueError {
             Self::MissingReplyPartition(request_id) => {
                 write!(f, "wallet reply for '{request_id}' has no reply partition")
             }
+            Self::OutboxTopicNotConfigured(topic) => {
+                write!(f, "wallet outbox topic '{topic}' is not configured")
+            }
             Self::PartitionNotFound { topic, partition } => {
                 write!(f, "redpanda topic '{topic}' has no partition {partition}")
             }
             Self::Producer(error) => write!(f, "redpanda publish failed: {error}"),
-            Self::Repository(error) => write!(f, "wallet offset storage failed: {error}"),
+            Self::Repository(error) => write!(f, "wallet repository failed: {error}"),
             Self::Serialize(error) => write!(f, "redpanda payload serialization failed: {error}"),
             Self::Task(error) => write!(f, "wallet queue task failed: {error}"),
             Self::TopicHasNoPartitions(topic) => {
@@ -741,7 +823,7 @@ impl From<crate::worker::WalletError> for QueueError {
 #[cfg(test)]
 mod tests {
     use protocol::{
-        common::{Asset, CommandEnvelope, OrderType, Side},
+        common::{Asset, CommandEnvelope, OrderType, PositionSide, Side},
         engine::{
             AccountDelta, EngineCommand, ExecutionReason, FeeCharged, FeeDelta, FundingPayment,
             FundingPaymentApplied, OrderCancelled, OrderExpired, ReservationReleased,
@@ -1044,7 +1126,7 @@ mod tests {
                 payments: vec![FundingPayment {
                     user_id: 42,
                     position_id: String::from("pos-42-1"),
-                    side: Side::LONG,
+                    side: PositionSide::LONG,
                     asset: Asset::USDC,
                     amount: -2,
                 }],

@@ -1,18 +1,21 @@
 use protocol::{
     common::Asset,
-    engine::EngineCommand,
+    engine::{self, EngineCommand},
     wallet::{
-        CancelOrderIntent, CommandAccepted, CommandRejected, InsufficientFunds, PlaceOrderIntent,
-        ReleaseReservation, SettleTrade, WalletAccountDeltaApplied, WalletCommand,
-        WalletDepositApplied, WalletEvent, WalletFundsReleased, WalletFundsReserved, WalletReply,
-        WalletTradeSettled, WalletWithdrawalApplied,
+        self, BalanceUpdated, CancelOrderIntent, CommandAccepted, CommandRejected, Deposit,
+        FundsReserved, InsufficientFunds, PlaceOrderIntent, ReleaseReservation, SettleTrade,
+        WalletAccountDeltaApplied, WalletCommand, WalletDepositApplied, WalletEvent,
+        WalletFundsReleased, WalletFundsReserved, WalletReply, WalletTradeSettled,
+        WalletWithdrawalApplied, Withdraw,
     },
 };
 use serde_json::Value;
 
 use crate::{
+    engine_inputs::engine_command_outbox_message,
     repository::{
-        AccountDeltaUpdate, WalletRepository, WalletRepositoryError, insufficient_funds_reply,
+        AccountDeltaUpdate, BalanceSnapshot, NewWalletOutboxMessage, ReservationRecord,
+        WalletRepository, WalletRepositoryError, insufficient_funds_reply,
     },
     router::{WalletAction, route_command},
 };
@@ -44,11 +47,29 @@ pub struct ApplyAccountDelta {
 #[derive(Clone)]
 pub struct WalletProcessor {
     repository: WalletRepository,
+    wallet_events_topic: String,
+    engine_commands_topic: String,
 }
 
 impl WalletProcessor {
     pub fn new(repository: WalletRepository) -> Self {
-        Self { repository }
+        Self::new_with_topics(
+            repository,
+            wallet::WALLET_EVENTS_TOPIC,
+            engine::ENGINE_INPUT_TOPIC,
+        )
+    }
+
+    pub fn new_with_topics(
+        repository: WalletRepository,
+        wallet_events_topic: impl Into<String>,
+        engine_commands_topic: impl Into<String>,
+    ) -> Self {
+        Self {
+            repository,
+            wallet_events_topic: wallet_events_topic.into(),
+            engine_commands_topic: engine_commands_topic.into(),
+        }
     }
 
     pub async fn process_command(
@@ -71,29 +92,33 @@ impl WalletProcessor {
                     return Ok(reply_result(reply));
                 }
 
-                let balance = self.repository.apply_deposit(&deposit).await?;
-                let reply = WalletReply::BalanceUpdated(balance.clone());
+                let wallet_events_topic = self.wallet_events_topic.clone();
+                let wallet_key = deposit.envelope.user_id.to_string();
+                let dedupe_key = format!(
+                    "wallet-event:deposit-applied:{}:{}",
+                    deposit.envelope.user_id, deposit.envelope.idempotency_key
+                );
+                let balance = self
+                    .repository
+                    .apply_deposit_with_outbox(&deposit, "Deposit", |balance| {
+                        let reply = WalletReply::BalanceUpdated(balance.clone());
+                        let event = deposit_applied_event(&dedupe_key, &deposit, balance);
+                        let outbox = wallet_event_outbox_message(
+                            &wallet_events_topic,
+                            dedupe_key.clone(),
+                            wallet_key.clone(),
+                            &event,
+                        )?;
 
-                self.record_reply(
-                    deposit.envelope.user_id,
-                    "Deposit",
-                    &deposit.envelope.idempotency_key,
-                    &deposit.envelope.request_id,
-                    &reply,
-                )
-                .await?;
+                        Ok((serde_json::to_value(&reply)?, vec![outbox]))
+                    })
+                    .await?;
+                let reply = WalletReply::BalanceUpdated(balance.clone());
+                let event = deposit_applied_event(&dedupe_key, &deposit, &balance);
 
                 Ok(WalletProcessResult {
                     wallet_replies: vec![reply],
-                    wallet_events: vec![WalletEvent::DepositApplied(WalletDepositApplied {
-                        request_id: balance.request_id,
-                        user_id: deposit.envelope.user_id,
-                        asset: balance.asset,
-                        amount: deposit.amount,
-                        reference_id: deposit.reference_id,
-                        total: balance.total,
-                        locked: balance.locked,
-                    })],
+                    wallet_events: vec![event],
                     engine_commands: Vec::new(),
                 })
             }
@@ -110,46 +135,59 @@ impl WalletProcessor {
                     return Ok(reply_result(reply));
                 }
 
-                let reply = match self.repository.apply_withdraw(&withdraw).await {
-                    Ok(balance) => WalletReply::BalanceUpdated(balance.clone()),
+                let wallet_events_topic = self.wallet_events_topic.clone();
+                let wallet_key = withdraw.envelope.user_id.to_string();
+                let dedupe_key = format!(
+                    "wallet-event:withdrawal-applied:{}:{}",
+                    withdraw.envelope.user_id, withdraw.envelope.idempotency_key
+                );
+                let balance = match self
+                    .repository
+                    .apply_withdraw_with_outbox(&withdraw, "Withdraw", |balance| {
+                        let reply = WalletReply::BalanceUpdated(balance.clone());
+                        let event = withdrawal_applied_event(&dedupe_key, &withdraw, balance);
+                        let outbox = wallet_event_outbox_message(
+                            &wallet_events_topic,
+                            dedupe_key.clone(),
+                            wallet_key.clone(),
+                            &event,
+                        )?;
+
+                        Ok((serde_json::to_value(&reply)?, vec![outbox]))
+                    })
+                    .await
+                {
+                    Ok(balance) => balance,
                     Err(WalletRepositoryError::InsufficientFunds { available }) => {
-                        WalletReply::InsufficientFunds(InsufficientFunds {
+                        let reply = WalletReply::InsufficientFunds(InsufficientFunds {
                             request_id: withdraw.envelope.request_id.clone(),
                             asset: withdraw.asset,
                             required: withdraw.amount,
                             available,
-                        })
+                        });
+                        self.record_reply(
+                            withdraw.envelope.user_id,
+                            "Withdraw",
+                            &withdraw.envelope.idempotency_key,
+                            &withdraw.envelope.request_id,
+                            &reply,
+                        )
+                        .await?;
+
+                        return Ok(WalletProcessResult {
+                            wallet_replies: vec![reply],
+                            wallet_events: Vec::new(),
+                            engine_commands: Vec::new(),
+                        });
                     }
                     Err(error) => return Err(error),
                 };
-
-                self.record_reply(
-                    withdraw.envelope.user_id,
-                    "Withdraw",
-                    &withdraw.envelope.idempotency_key,
-                    &withdraw.envelope.request_id,
-                    &reply,
-                )
-                .await?;
-
-                let wallet_events = match &reply {
-                    WalletReply::BalanceUpdated(balance) => {
-                        vec![WalletEvent::WithdrawalApplied(WalletWithdrawalApplied {
-                            request_id: balance.request_id.clone(),
-                            user_id: withdraw.envelope.user_id,
-                            asset: balance.asset,
-                            amount: withdraw.amount,
-                            destination: withdraw.destination.clone(),
-                            total: balance.total,
-                            locked: balance.locked,
-                        })]
-                    }
-                    _ => Vec::new(),
-                };
+                let reply = WalletReply::BalanceUpdated(balance.clone());
+                let event = withdrawal_applied_event(&dedupe_key, &withdraw, &balance);
 
                 Ok(WalletProcessResult {
                     wallet_replies: vec![reply],
-                    wallet_events,
+                    wallet_events: vec![event],
                     engine_commands: Vec::new(),
                 })
             }
@@ -187,60 +225,93 @@ impl WalletProcessor {
             return Ok(reply_result(reply));
         }
 
-        let reply = match self
+        let wallet_events_topic = self.wallet_events_topic.clone();
+        let engine_commands_topic = self.engine_commands_topic.clone();
+        let wallet_key = intent.envelope.user_id.to_string();
+        let engine_dedupe_key = format!(
+            "engine-input:place-order:{}:{}",
+            intent.envelope.user_id, intent.envelope.idempotency_key
+        );
+
+        let reserved = match self
             .repository
-            .reserve_funds(
+            .reserve_funds_with_outbox(
                 intent.envelope.user_id,
                 &intent.envelope.request_id,
                 &intent.envelope.idempotency_key,
                 intent.margin_asset,
                 intent.required_margin,
+                "PlaceOrderIntent",
+                |reserved| {
+                    let reply = WalletReply::FundsReserved(reserved.clone());
+                    let wallet_event_id =
+                        format!("wallet-event:funds-reserved:{}", reserved.reservation_id);
+                    let event = funds_reserved_event(&wallet_event_id, &intent, reserved);
+                    let engine_command = EngineCommand::PlaceOrder(
+                        intent
+                            .clone()
+                            .into_reserved_order(reserved.reservation_id.clone()),
+                    );
+                    let wallet_outbox = wallet_event_outbox_message(
+                        &wallet_events_topic,
+                        wallet_event_id,
+                        wallet_key.clone(),
+                        &event,
+                    )?;
+                    let engine_outbox = engine_command_outbox_message(
+                        &engine_commands_topic,
+                        engine_dedupe_key.clone(),
+                        &engine_command,
+                    )?;
+
+                    Ok((
+                        serde_json::to_value(&reply)?,
+                        vec![wallet_outbox, engine_outbox],
+                    ))
+                },
             )
             .await
         {
-            Ok(reserved) => WalletReply::FundsReserved(reserved),
+            Ok(reserved) => reserved,
             Err(WalletRepositoryError::InsufficientFunds { available }) => {
-                WalletReply::InsufficientFunds(insufficient_funds_reply(
+                let reply = WalletReply::InsufficientFunds(insufficient_funds_reply(
                     intent.envelope.request_id.clone(),
                     intent.margin_asset,
                     intent.required_margin,
                     available,
-                ))
+                ));
+                self.record_reply(
+                    intent.envelope.user_id,
+                    "PlaceOrderIntent",
+                    &intent.envelope.idempotency_key,
+                    &intent.envelope.request_id,
+                    &reply,
+                )
+                .await?;
+
+                return Ok(WalletProcessResult {
+                    wallet_replies: vec![reply],
+                    wallet_events: Vec::new(),
+                    engine_commands: Vec::new(),
+                });
             }
             Err(error) => return Err(error),
         };
 
-        self.record_reply(
-            intent.envelope.user_id,
-            "PlaceOrderIntent",
-            &intent.envelope.idempotency_key,
-            &intent.envelope.request_id,
-            &reply,
-        )
-        .await?;
+        let reply = WalletReply::FundsReserved(reserved.clone());
+        let event = funds_reserved_event(
+            &format!("wallet-event:funds-reserved:{}", reserved.reservation_id),
+            &intent,
+            &reserved,
+        );
+        let engine_command =
+            EngineCommand::PlaceOrder(intent.into_reserved_order(reserved.reservation_id.clone()));
 
-        let mut result = WalletProcessResult {
-            wallet_replies: vec![reply.clone()],
-            wallet_events: Vec::new(),
-            engine_commands: Vec::new(),
-        };
-
-        if let WalletReply::FundsReserved(reserved) = reply {
-            result
-                .wallet_events
-                .push(WalletEvent::FundsReserved(WalletFundsReserved {
-                    request_id: reserved.request_id.clone(),
-                    user_id: intent.envelope.user_id,
-                    reservation_id: reserved.reservation_id.clone(),
-                    asset: reserved.asset,
-                    amount: reserved.amount,
-                }));
-            result.engine_commands.push(EngineCommand::PlaceOrder(
-                intent.into_reserved_order(reserved.reservation_id),
-            ));
-        }
-
-        Ok(result)
+        Ok(WalletProcessResult {
+            wallet_replies: vec![reply],
+            wallet_events: vec![event],
+            engine_commands: vec![engine_command],
+        })
     }
 
     async fn forward_cancel(
@@ -262,22 +333,31 @@ impl WalletProcessor {
         let reply = WalletReply::CommandAccepted(CommandAccepted {
             request_id: intent.envelope.request_id.clone(),
         });
+        let engine_command = EngineCommand::CancelOrder(intent.clone().into_engine_cancel_order());
+        let engine_outbox = engine_command_outbox_message(
+            &self.engine_commands_topic,
+            format!(
+                "engine-input:cancel-order:{}:{}",
+                intent.envelope.user_id, intent.envelope.idempotency_key
+            ),
+            &engine_command,
+        )?;
 
-        self.record_reply(
-            intent.envelope.user_id,
-            "CancelOrderIntent",
-            &intent.envelope.idempotency_key,
-            &intent.envelope.request_id,
-            &reply,
-        )
-        .await?;
+        self.repository
+            .record_idempotent_reply_with_outbox(
+                intent.envelope.user_id,
+                "CancelOrderIntent",
+                &intent.envelope.idempotency_key,
+                &intent.envelope.request_id,
+                serde_json::to_value(&reply)?,
+                &[engine_outbox],
+            )
+            .await?;
 
         Ok(WalletProcessResult {
             wallet_replies: vec![reply],
             wallet_events: Vec::new(),
-            engine_commands: vec![EngineCommand::CancelOrder(
-                intent.into_engine_cancel_order(),
-            )],
+            engine_commands: vec![engine_command],
         })
     }
 
@@ -285,17 +365,30 @@ impl WalletProcessor {
         &self,
         release: ReleaseReservation,
     ) -> Result<WalletProcessResult, WalletRepositoryError> {
-        let reservation = self.repository.release_reservation(&release).await?;
+        let wallet_events_topic = self.wallet_events_topic.clone();
+        let dedupe_key = format!(
+            "wallet-event:funds-released:{}:{}:{}",
+            release.reservation_id, release.reason, release.amount
+        );
+        let reservation = self
+            .repository
+            .release_reservation_with_outbox(&release, |reservation| {
+                let event = funds_released_event(&dedupe_key, &release, reservation);
+                let outbox = wallet_event_outbox_message(
+                    &wallet_events_topic,
+                    dedupe_key.clone(),
+                    reservation.reservation_id.clone(),
+                    &event,
+                )?;
+
+                Ok(vec![outbox])
+            })
+            .await?;
+        let event = funds_released_event(&dedupe_key, &release, &reservation);
 
         Ok(WalletProcessResult {
             wallet_replies: Vec::new(),
-            wallet_events: vec![WalletEvent::FundsReleased(WalletFundsReleased {
-                user_id: reservation.user_id,
-                reservation_id: reservation.reservation_id,
-                asset: reservation.asset,
-                amount: release.amount,
-                reason: release.reason,
-            })],
+            wallet_events: vec![event],
             engine_commands: Vec::new(),
         })
     }
@@ -304,19 +397,30 @@ impl WalletProcessor {
         &self,
         settle: SettleTrade,
     ) -> Result<WalletProcessResult, WalletRepositoryError> {
-        let reservation = self.repository.settle_trade(&settle).await?;
+        let wallet_events_topic = self.wallet_events_topic.clone();
+        let dedupe_key = format!(
+            "wallet-event:trade-settled:{}:{}",
+            settle.fill_id, settle.reservation_id
+        );
+        let reservation = self
+            .repository
+            .settle_trade_with_outbox(&settle, |reservation| {
+                let event = trade_settled_event(&dedupe_key, &settle, reservation);
+                let outbox = wallet_event_outbox_message(
+                    &wallet_events_topic,
+                    dedupe_key.clone(),
+                    reservation.reservation_id.clone(),
+                    &event,
+                )?;
+
+                Ok(vec![outbox])
+            })
+            .await?;
+        let event = trade_settled_event(&dedupe_key, &settle, &reservation);
 
         Ok(WalletProcessResult {
             wallet_replies: Vec::new(),
-            wallet_events: vec![WalletEvent::TradeSettled(WalletTradeSettled {
-                user_id: reservation.user_id,
-                fill_id: settle.fill_id,
-                reservation_id: reservation.reservation_id,
-                debit_asset: settle.debit_asset,
-                debit_amount: settle.debit_amount,
-                credit_asset: settle.credit_asset,
-                credit_amount: settle.credit_amount,
-            })],
+            wallet_events: vec![event],
             engine_commands: Vec::new(),
         })
     }
@@ -325,36 +429,42 @@ impl WalletProcessor {
         &self,
         delta: ApplyAccountDelta,
     ) -> Result<WalletProcessResult, WalletRepositoryError> {
+        let update = AccountDeltaUpdate {
+            user_id: delta.user_id,
+            asset: delta.asset,
+            total_delta: delta.total_delta,
+            locked_delta: delta.locked_delta,
+            kind: delta.kind.clone(),
+            reference_id: delta.reference_id.clone(),
+        };
+        let wallet_events_topic = self.wallet_events_topic.clone();
+        let dedupe_key = format!(
+            "wallet-event:account-delta-applied:{}:{}:{}:{:?}",
+            delta.kind, delta.reference_id, delta.user_id, delta.asset
+        );
         let balance = self
             .repository
-            .apply_account_delta(&AccountDeltaUpdate {
-                user_id: delta.user_id,
-                asset: delta.asset,
-                total_delta: delta.total_delta,
-                locked_delta: delta.locked_delta,
-                kind: delta.kind.clone(),
-                reference_id: delta.reference_id.clone(),
+            .apply_account_delta_with_outbox(&update, |balance| {
+                let event = account_delta_applied_event(&dedupe_key, &delta, balance);
+                let outbox = wallet_event_outbox_message(
+                    &wallet_events_topic,
+                    dedupe_key.clone(),
+                    delta.user_id.to_string(),
+                    &event,
+                )?;
+
+                Ok(vec![outbox])
             })
             .await?;
 
         let Some(balance) = balance else {
             return Ok(WalletProcessResult::default());
         };
+        let event = account_delta_applied_event(&dedupe_key, &delta, &balance);
 
         Ok(WalletProcessResult {
             wallet_replies: Vec::new(),
-            wallet_events: vec![WalletEvent::AccountDeltaApplied(
-                WalletAccountDeltaApplied {
-                    user_id: delta.user_id,
-                    asset: delta.asset,
-                    total_delta: delta.total_delta,
-                    locked_delta: delta.locked_delta,
-                    kind: delta.kind,
-                    reference_id: delta.reference_id,
-                    total: balance.total,
-                    locked: balance.locked,
-                },
-            )],
+            wallet_events: vec![event],
             engine_commands: Vec::new(),
         })
     }
@@ -421,6 +531,114 @@ fn reply_result(reply: WalletReply) -> WalletProcessResult {
         wallet_events: Vec::new(),
         engine_commands: Vec::new(),
     }
+}
+
+fn funds_reserved_event(
+    event_id: &str,
+    intent: &PlaceOrderIntent,
+    reserved: &FundsReserved,
+) -> WalletEvent {
+    WalletEvent::FundsReserved(WalletFundsReserved {
+        event_id: Some(String::from(event_id)),
+        request_id: reserved.request_id.clone(),
+        user_id: intent.envelope.user_id,
+        reservation_id: reserved.reservation_id.clone(),
+        asset: reserved.asset,
+        amount: reserved.amount,
+    })
+}
+
+fn deposit_applied_event(
+    event_id: &str,
+    deposit: &Deposit,
+    balance: &BalanceUpdated,
+) -> WalletEvent {
+    WalletEvent::DepositApplied(WalletDepositApplied {
+        event_id: Some(String::from(event_id)),
+        request_id: balance.request_id.clone(),
+        user_id: deposit.envelope.user_id,
+        asset: balance.asset,
+        amount: deposit.amount,
+        reference_id: deposit.reference_id.clone(),
+        total: balance.total,
+        locked: balance.locked,
+    })
+}
+
+fn withdrawal_applied_event(
+    event_id: &str,
+    withdraw: &Withdraw,
+    balance: &BalanceUpdated,
+) -> WalletEvent {
+    WalletEvent::WithdrawalApplied(WalletWithdrawalApplied {
+        event_id: Some(String::from(event_id)),
+        request_id: balance.request_id.clone(),
+        user_id: withdraw.envelope.user_id,
+        asset: balance.asset,
+        amount: withdraw.amount,
+        destination: withdraw.destination.clone(),
+        total: balance.total,
+        locked: balance.locked,
+    })
+}
+
+fn funds_released_event(
+    event_id: &str,
+    release: &ReleaseReservation,
+    reservation: &ReservationRecord,
+) -> WalletEvent {
+    WalletEvent::FundsReleased(WalletFundsReleased {
+        event_id: Some(String::from(event_id)),
+        user_id: reservation.user_id,
+        reservation_id: reservation.reservation_id.clone(),
+        asset: reservation.asset,
+        amount: release.amount,
+        reason: release.reason.clone(),
+    })
+}
+
+fn trade_settled_event(
+    event_id: &str,
+    settle: &SettleTrade,
+    reservation: &ReservationRecord,
+) -> WalletEvent {
+    WalletEvent::TradeSettled(WalletTradeSettled {
+        event_id: Some(String::from(event_id)),
+        user_id: reservation.user_id,
+        fill_id: settle.fill_id,
+        reservation_id: reservation.reservation_id.clone(),
+        debit_asset: settle.debit_asset,
+        debit_amount: settle.debit_amount,
+        credit_asset: settle.credit_asset,
+        credit_amount: settle.credit_amount,
+    })
+}
+
+fn account_delta_applied_event(
+    event_id: &str,
+    delta: &ApplyAccountDelta,
+    balance: &BalanceSnapshot,
+) -> WalletEvent {
+    WalletEvent::AccountDeltaApplied(WalletAccountDeltaApplied {
+        event_id: Some(String::from(event_id)),
+        user_id: delta.user_id,
+        asset: delta.asset,
+        total_delta: delta.total_delta,
+        locked_delta: delta.locked_delta,
+        kind: delta.kind.clone(),
+        reference_id: delta.reference_id.clone(),
+        total: balance.total,
+        locked: balance.locked,
+    })
+}
+
+fn wallet_event_outbox_message(
+    topic: &str,
+    dedupe_key: String,
+    message_key: String,
+    event: &WalletEvent,
+) -> Result<NewWalletOutboxMessage, WalletRepositoryError> {
+    NewWalletOutboxMessage::json(dedupe_key, topic, None, message_key, "WalletEvent", event)
 }
 
 pub fn storage_error_reply(request_id: String, reason: impl Into<String>) -> WalletReply {

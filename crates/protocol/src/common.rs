@@ -27,6 +27,16 @@ pub enum Side {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PositionSide {
+    #[serde(rename = "LONG")]
+    LONG,
+    #[serde(rename = "SHORT")]
+    SHORT,
+    #[serde(rename = "FLAT")]
+    FLAT,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderType {
     #[serde(rename = "LIMIT")]
     LIMIT,
@@ -62,6 +72,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Side>("\"SHORT\"").unwrap(),
             Side::SHORT
+        );
+    }
+
+    #[test]
+    fn position_side_accepts_flat_wire_value() {
+        assert_eq!(
+            serde_json::from_str::<PositionSide>("\"FLAT\"").unwrap(),
+            PositionSide::FLAT
         );
     }
 

@@ -11,7 +11,19 @@ account source consumed by websocket. Every wallet event is JSON encoded as:
 ```
 
 Wallet events must carry `user_id` so consumers can route without database
-lookups.
+lookups. New wallet events also carry `event_id`, a stable logical id equal to
+the wallet outbox `dedupe_key`.
+
+Wallet does not publish these events directly from the command processing
+path. Balance and reservation mutations enqueue `WalletEvent` rows in
+`wallet_outbox` inside the same Postgres transaction. The wallet outbox relay
+claims pending rows, publishes them to `wallet.events`, and marks them
+published after Redpanda accepts the record.
+
+The same relay also publishes engine inputs to `engine.input`. Orders and
+cancels are enqueued after wallet reservation checks; mark price and funding
+inputs are enqueued by `engine-ingress`. Wallet replies remain direct so API
+callers can receive request status immediately.
 
 ## Variants
 
@@ -55,7 +67,7 @@ user_id, fill_id, reservation_id, debit_asset, debit_amount, credit_asset, credi
 Ledger entries:
 
 ```text
-kind=TRADE_DEBIT, total_delta=-debit_amount, locked_delta=0 for exact same-asset reservation consumption, otherwise -debit_amount, reference_id=fill_id
+kind=TRADE_DEBIT, total_delta=-debit_amount, locked_delta=-debit_amount, reference_id=fill_id
 kind=TRADE_CREDIT, total_delta=+credit_amount, locked_delta=0, reference_id=fill_id
 ```
 
@@ -114,3 +126,12 @@ kind=<event.kind>, total_delta=<event.total_delta>, locked_delta=<event.locked_d
   `payload.user_id`.
 - Engine events are audit context for money movement. Wallet events are the
   accounting source of truth.
+- The wallet outbox relay logs backlog metrics periodically. Configure
+  `WALLET_OUTBOX_METRICS_INTERVAL_SECONDS`,
+  `WALLET_OUTBOX_ALERT_PENDING_COUNT`, and
+  `WALLET_OUTBOX_ALERT_OLDEST_PENDING_SECONDS` for local alert thresholds.
+- Consumers should remain idempotent. The outbox is at least once at the
+  publish boundary: if Redpanda accepts a record but the published mark fails,
+  the relay may retry and publish the same logical event again at a later
+  offset. Ledger deduplicates persisted accounting rows by `event_id`, and the
+  websocket service uses bounded in-memory `event_id` dedupe for live fanout.

@@ -20,7 +20,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     run_migration().await?;
 
     let repository = WalletRepository::new(pool);
-    let processor = WalletProcessor::new(repository.clone());
+    let processor = WalletProcessor::new_with_topics(
+        repository.clone(),
+        settings.wallet_events_topic.clone(),
+        settings.engine_commands_topic.clone(),
+    );
     let worker = WalletWorker::new(settings, processor, repository);
 
     worker.run().await?;
