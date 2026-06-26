@@ -745,16 +745,6 @@ fn engine_wallet_commands_from_engine_event(event: EngineEvent) -> Vec<EngineWal
                 })
                 .collect()
         }
-        EngineEvent::FeeCharged(event) => {
-            vec![EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
-                user_id: event.user_id,
-                asset: event.asset,
-                total_delta: -event.amount,
-                locked_delta: 0,
-                kind: String::from("FEE_CHARGED"),
-                reference_id: event.fee_id,
-            })]
-        }
         EngineEvent::AccountDelta(event) => {
             vec![EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
                 user_id: event.user_id,
@@ -774,9 +764,7 @@ fn engine_wallet_commands_from_engine_event(event: EngineEvent) -> Vec<EngineWal
         | EngineEvent::LiquidationStarted(_)
         | EngineEvent::LiquidationExecuted(_)
         | EngineEvent::LiquidationCompleted(_)
-        | EngineEvent::AdlExecuted(_)
-        | EngineEvent::OrderBookSnapshotCreated(_)
-        | EngineEvent::EngineCheckpointCommitted(_) => Vec::new(),
+        | EngineEvent::AdlExecuted(_) => Vec::new(),
     }
 }
 
@@ -825,7 +813,7 @@ mod tests {
     use protocol::{
         common::{Asset, CommandEnvelope, OrderType, PositionSide, Side},
         engine::{
-            AccountDelta, EngineCommand, ExecutionReason, FeeCharged, FeeDelta, FundingPayment,
+            AccountDelta, EngineCommand, ExecutionReason, FeeDelta, FundingPayment,
             FundingPaymentApplied, OrderCancelled, OrderExpired, ReservationReleased,
             TradeExecuted, TradeSettlement,
         },
@@ -1142,37 +1130,6 @@ mod tests {
                 locked_delta: 0,
                 kind: String::from("FUNDING_PAYMENT"),
                 reference_id: String::from("eng-6:payment:0:pos-42-1"),
-            })]
-        );
-    }
-
-    #[test]
-    fn fee_charged_event_becomes_account_delta_command() {
-        let commands =
-            engine_wallet_commands_from_engine_event(EngineEvent::FeeCharged(FeeCharged {
-                engine_event_id: Some(String::from("eng-7")),
-                market_id: 1,
-                engine_sequence: 7,
-                engine_timestamp_ms: 1_710_000_000_006,
-                source_input_id: None,
-                source_input_offset: None,
-                fee_id: String::from("fee-1"),
-                user_id: 42,
-                asset: Asset::USDC,
-                amount: 5,
-                fee_type: String::from("LIQUIDATION"),
-                destination: String::from("INSURANCE_FUND"),
-            }));
-
-        assert_eq!(
-            commands,
-            vec![EngineWalletCommand::ApplyAccountDelta(ApplyAccountDelta {
-                user_id: 42,
-                asset: Asset::USDC,
-                total_delta: -5,
-                locked_delta: 0,
-                kind: String::from("FEE_CHARGED"),
-                reference_id: String::from("fee-1"),
             })]
         );
     }

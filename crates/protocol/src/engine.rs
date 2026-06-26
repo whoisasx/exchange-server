@@ -214,14 +214,11 @@ pub enum EngineEvent {
     FundingPaymentApplied(FundingPaymentApplied),
     PositionChanged(PositionChanged),
     RiskStateUpdated(RiskStateUpdated),
-    FeeCharged(FeeCharged),
     LiquidationStarted(LiquidationStarted),
     LiquidationExecuted(LiquidationExecuted),
     LiquidationCompleted(LiquidationCompleted),
     AdlExecuted(AdlExecuted),
     AccountDelta(AccountDelta),
-    OrderBookSnapshotCreated(OrderBookSnapshotCreated),
-    EngineCheckpointCommitted(EngineCheckpointCommitted),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,25 +477,6 @@ pub struct RiskStateUpdated {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FeeCharged {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_event_id: Option<String>,
-    pub market_id: i64,
-    pub engine_sequence: i64,
-    pub engine_timestamp_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_input_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_input_offset: Option<i64>,
-    pub fee_id: String,
-    pub user_id: i64,
-    pub asset: Asset,
-    pub amount: i64,
-    pub fee_type: String,
-    pub destination: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiquidationStarted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_event_id: Option<String>,
@@ -600,45 +578,6 @@ pub struct AccountDelta {
     pub locked_delta: i64,
     pub reason: String,
     pub reference_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrderBookSnapshotCreated {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_event_id: Option<String>,
-    pub market_id: i64,
-    pub engine_sequence: i64,
-    pub engine_timestamp_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_input_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_input_offset: Option<i64>,
-    pub snapshot_id: String,
-    pub uri: String,
-    pub checksum_sha256: String,
-    pub byte_size: i64,
-    pub schema_version: i64,
-    pub last_engine_sequence: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineCheckpointCommitted {
-    pub checkpoint_id: String,
-    pub engine_timestamp_ms: i64,
-    pub schema_version: i64,
-    pub engine_build: String,
-    pub config_hash: String,
-    pub engine_input_next_offset: i64,
-    pub uri: String,
-    pub checksum_sha256: String,
-    pub byte_size: i64,
-    pub market_sequences: Vec<MarketSequence>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MarketSequence {
-    pub market_id: i64,
-    pub engine_sequence: i64,
 }
 
 #[cfg(test)]
@@ -754,7 +693,7 @@ mod tests {
             checked += 1;
         }
 
-        assert_eq!(checked, 33, "unexpected number of engine JSON fixtures");
+        assert_eq!(checked, 30, "unexpected number of engine JSON fixtures");
     }
 
     #[test]
@@ -762,7 +701,6 @@ mod tests {
         let mut input_fixtures = 0;
         let mut reply_fixtures = 0;
         let mut event_fixtures = 0;
-        let mut checkpoint_next_offsets = Vec::new();
         let mut event_ids = BTreeSet::new();
         let mut market_sequences = BTreeSet::new();
         let mut max_source_input_offset = None::<i64>;
@@ -786,19 +724,14 @@ mod tests {
                 assert_reply_metadata(file_name, payload, &mut max_source_input_offset);
             } else if file_name.ends_with(".event.json") {
                 event_fixtures += 1;
-                let event_type = non_empty_string(file_name, &fixture, "type");
-                if event_type == "EngineCheckpointCommitted" {
-                    assert_checkpoint_metadata(file_name, payload, &mut checkpoint_next_offsets);
-                } else {
-                    assert_market_event_metadata(
-                        file_name,
-                        event_type,
-                        payload,
-                        &mut event_ids,
-                        &mut market_sequences,
-                        &mut max_source_input_offset,
-                    );
-                }
+                non_empty_string(file_name, &fixture, "type");
+                assert_market_event_metadata(
+                    file_name,
+                    payload,
+                    &mut event_ids,
+                    &mut market_sequences,
+                    &mut max_source_input_offset,
+                );
             } else {
                 panic!("fixture filename does not declare protocol stream kind: {file_name}");
             }
@@ -806,19 +739,10 @@ mod tests {
 
         assert_eq!(input_fixtures, 7, "unexpected engine input fixture count");
         assert_eq!(reply_fixtures, 6, "unexpected engine reply fixture count");
-        assert_eq!(event_fixtures, 20, "unexpected engine event fixture count");
-        assert_eq!(
-            checkpoint_next_offsets.len(),
-            1,
-            "expected one engine checkpoint fixture"
-        );
-
-        let checkpoint_next_offset = checkpoint_next_offsets[0];
-        let max_source_input_offset =
-            max_source_input_offset.expect("fixtures should carry source input offsets");
+        assert_eq!(event_fixtures, 17, "unexpected engine event fixture count");
         assert!(
-            checkpoint_next_offset > max_source_input_offset,
-            "checkpoint next offset {checkpoint_next_offset} must be after fixture source offset {max_source_input_offset}"
+            max_source_input_offset.is_some(),
+            "fixtures should carry source input offsets"
         );
     }
 
@@ -901,7 +825,6 @@ mod tests {
 
     fn assert_market_event_metadata(
         file_name: &str,
-        event_type: &str,
         payload: &Value,
         event_ids: &mut BTreeSet<String>,
         market_sequences: &mut BTreeSet<(i64, i64)>,
@@ -924,51 +847,6 @@ mod tests {
         non_empty_string(file_name, payload, "source_input_id");
         let source_input_offset = non_negative_i64(file_name, payload, "source_input_offset");
         update_max_source_input_offset(max_source_input_offset, source_input_offset);
-
-        if event_type == "OrderBookSnapshotCreated" {
-            assert_eq!(
-                positive_i64(file_name, payload, "last_engine_sequence"),
-                engine_sequence,
-                "{file_name} snapshot should advertise the latest applied engine sequence"
-            );
-        }
-    }
-
-    fn assert_checkpoint_metadata(
-        file_name: &str,
-        payload: &Value,
-        checkpoint_next_offsets: &mut Vec<i64>,
-    ) {
-        non_empty_string(file_name, payload, "checkpoint_id");
-        positive_i64(file_name, payload, "engine_timestamp_ms");
-        positive_i64(file_name, payload, "schema_version");
-        non_empty_string(file_name, payload, "engine_build");
-        non_empty_string(file_name, payload, "config_hash");
-        non_empty_string(file_name, payload, "uri");
-        non_empty_string(file_name, payload, "checksum_sha256");
-        positive_i64(file_name, payload, "byte_size");
-
-        let engine_input_next_offset = positive_i64(file_name, payload, "engine_input_next_offset");
-        checkpoint_next_offsets.push(engine_input_next_offset);
-
-        let market_sequences = payload
-            .get("market_sequences")
-            .and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("{file_name} payload.market_sequences must be an array"));
-        assert!(
-            !market_sequences.is_empty(),
-            "{file_name} checkpoint must carry per-market engine sequences"
-        );
-
-        let mut market_ids = BTreeSet::new();
-        for market_sequence in market_sequences {
-            let market_id = positive_i64(file_name, market_sequence, "market_id");
-            assert!(
-                market_ids.insert(market_id),
-                "{file_name} checkpoint duplicates market_id {market_id}"
-            );
-            positive_i64(file_name, market_sequence, "engine_sequence");
-        }
     }
 
     fn fixture_payload<'a>(file_name: &str, fixture: &'a Value) -> &'a Value {

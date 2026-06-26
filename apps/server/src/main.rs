@@ -30,7 +30,7 @@ pub async fn not_found() -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    dotenv().ok().expect("CONFIG must be present");
+    dotenv().ok();
     let config = Config::init();
 
     let pool = create_db_pool(&config.database_url)

@@ -1,6 +1,6 @@
 # Engine Stream Contract
 
-This contract describes the current Rust wire protocol used by this workspace and the intended agreement with the external C++ matching engine. The base design lives in `docs/engine-system-plan.md`; this file only defines the stream contract.
+This contract describes the current Rust wire protocol used by this workspace and the intended agreement with the external C++ matching engine.
 
 The Rust protocol uses `engine.input` for engine-affecting inputs. `ENGINE_COMMANDS_TOPIC` remains an alias for `ENGINE_INPUT_TOPIC`, and `ENGINE_COMMANDS_LEGACY_TOPIC` names the old `engine.commands` topic for compatibility.
 
@@ -27,7 +27,7 @@ All stream messages are JSON encoded with this shape:
 | --- | --- | --- | --- |
 | `engine.input` | wallet outbox relay | C++ engine | Globally ordered engine-affecting inputs for orders, cancels, mark price, and funding. |
 | `engine.replies` | C++ engine | server reply consumer | Request lifecycle replies only. |
-| `engine.events` | C++ engine | wallet, projector, websocket, ledger, timeseries | Durable engine facts and state changes. |
+| `engine.events` | C++ engine | wallet, projector, websocket, timeseries | Durable engine facts and state changes. |
 
 Wallet and `engine-ingress` enqueue engine-affecting inputs into
 `wallet_outbox`; the wallet outbox relay is the only Redpanda publisher for
@@ -258,7 +258,7 @@ Mark price, funding, startup liquidation, and engine-originated liquidation flow
 
 ## Events
 
-Events go to `engine.events`. Market-scoped events should be keyed by `market_id`; engine-wide events such as `EngineCheckpointCommitted` are not tied to a single market.
+Events go to `engine.events`. Events are market-scoped and should be keyed by `market_id`.
 
 Market-scoped engine event payloads carry idempotent event metadata:
 
@@ -271,8 +271,6 @@ source_input_id and source_input_offset: optional source engine input identity f
 ```
 
 Producers should set `engine_event_id` and keep it stable across retries of the same emitted event. Consumers use it to deduplicate exact event delivery when present. Consumers use `(market_id, engine_sequence)` for market ordering and gap detection. For ordering, consumers should trust `engine_sequence` before `engine_timestamp_ms`; timestamps are for bucketing, display, and latency analysis.
-
-`EngineCheckpointCommitted` is engine-wide. It carries checkpoint metadata, `engine_input_next_offset`, and `market_sequences` instead of a single `market_id` and `engine_sequence`.
 
 Event fixture locations under `docs/examples`:
 
@@ -290,22 +288,19 @@ Event fixture locations under `docs/examples`:
 | `FundingPaymentApplied` | `docs/examples/engine-funding-payment-applied.event.json` |
 | `PositionChanged` | `docs/examples/engine-position-changed.event.json` |
 | `RiskStateUpdated` | `docs/examples/engine-risk-state-updated.event.json` |
-| `FeeCharged` | `docs/examples/engine-fee-charged.event.json` |
 | `LiquidationStarted` | `docs/examples/engine-liquidation-started.event.json` |
 | `LiquidationExecuted` | `docs/examples/engine-liquidation-executed.event.json` |
 | `LiquidationCompleted` | `docs/examples/engine-liquidation-completed.event.json` |
 | `AdlExecuted` | `docs/examples/engine-adl-executed.event.json` |
 | `AccountDelta` | `docs/examples/engine-account-delta.event.json` |
-| `OrderBookSnapshotCreated` | `docs/examples/engine-orderbook-snapshot-created.event.json` |
-| `EngineCheckpointCommitted` | `docs/examples/engine-checkpoint-committed.event.json` |
 
 Current Rust protocol tests validate all JSON fixtures in `docs/examples` against `EngineInput`, `EngineReply`, or `EngineEvent`.
 
-Consumers route market-scoped events with `market_id` and account fields such as `user_id`, `maker_user_id`, `taker_user_id`, `payments[].user_id`, or other variant-specific account identifiers. Engine-wide checkpoint events are recovery/audit signals and are not user-routed.
+Consumers route market-scoped events with `market_id` and account fields such as `user_id`, `maker_user_id`, `taker_user_id`, `payments[].user_id`, or other variant-specific account identifiers.
 
 Event consumers use engine events as follows:
 
-- Wallet consumes money-moving engine events such as reservation release, trade settlement, funding payment, fee charge, liquidation settlement, insurance fund transfer, ADL settlement, and account delta.
+- Wallet consumes money-moving engine events such as reservation release, trade settlement, funding payment, liquidation settlement, insurance fund transfer, ADL settlement, and account delta.
 - Projector consumes engine events to update orders, fills, positions, orderbook, risk state, funding history, and mark price history.
 - WebSocket consumes engine and wallet events for live user and market updates.
 - Ledger consumes `wallet.events` as the accounting source. Engine events may be audit context, but they are not the balance-mutation source of truth.

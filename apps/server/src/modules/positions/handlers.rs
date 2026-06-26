@@ -227,19 +227,6 @@ fn validate_close_leverage(leverage: i64) -> Result<(), String> {
     Ok(())
 }
 
-#[post("/liquidate")]
-pub async fn liquidate_position(req: HttpRequest) -> impl Responder {
-    if let Err(response) = authenticated_user(&req) {
-        return response;
-    }
-
-    HttpResponse::NotImplemented().json(ResponseBody::<()> {
-        success: false,
-        info: String::from("liquidation command is not implemented yet"),
-        body: None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use actix_web::{App, http::StatusCode, test, web};

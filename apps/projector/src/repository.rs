@@ -837,14 +837,6 @@ fn engine_event_log_metadata(event: &EngineEvent) -> EngineEventLogMetadata<'_> 
             engine_timestamp_ms: event.engine_timestamp_ms,
             checkpoint_id: None,
         },
-        EngineEvent::FeeCharged(event) => EngineEventLogMetadata {
-            event_type: "FeeCharged",
-            engine_event_id: event.engine_event_id.as_deref(),
-            market_id: Some(event.market_id),
-            engine_sequence: Some(event.engine_sequence),
-            engine_timestamp_ms: event.engine_timestamp_ms,
-            checkpoint_id: None,
-        },
         EngineEvent::LiquidationStarted(event) => EngineEventLogMetadata {
             event_type: "LiquidationStarted",
             engine_event_id: event.engine_event_id.as_deref(),
@@ -884,22 +876,6 @@ fn engine_event_log_metadata(event: &EngineEvent) -> EngineEventLogMetadata<'_> 
             engine_sequence: Some(event.engine_sequence),
             engine_timestamp_ms: event.engine_timestamp_ms,
             checkpoint_id: None,
-        },
-        EngineEvent::OrderBookSnapshotCreated(event) => EngineEventLogMetadata {
-            event_type: "OrderBookSnapshotCreated",
-            engine_event_id: event.engine_event_id.as_deref(),
-            market_id: Some(event.market_id),
-            engine_sequence: Some(event.engine_sequence),
-            engine_timestamp_ms: event.engine_timestamp_ms,
-            checkpoint_id: None,
-        },
-        EngineEvent::EngineCheckpointCommitted(event) => EngineEventLogMetadata {
-            event_type: "EngineCheckpointCommitted",
-            engine_event_id: None,
-            market_id: None,
-            engine_sequence: None,
-            engine_timestamp_ms: event.engine_timestamp_ms,
-            checkpoint_id: Some(event.checkpoint_id.as_str()),
         },
     }
 }
@@ -2358,34 +2334,6 @@ mod tests {
         assert_eq!(entry.event_type, "FundingRateUpdated");
         assert_eq!(entry.market_id, Some(7));
         assert_eq!(entry.engine_sequence, Some(43));
-    }
-
-    #[test]
-    fn engine_event_log_entry_uses_checkpoint_id_for_checkpoint_events() {
-        let event =
-            EngineEvent::EngineCheckpointCommitted(protocol::engine::EngineCheckpointCommitted {
-                checkpoint_id: String::from("checkpoint-1"),
-                engine_timestamp_ms: 1_710_000_000_002,
-                schema_version: 1,
-                engine_build: String::from("dev"),
-                config_hash: String::from("cfg-1"),
-                engine_input_next_offset: 321,
-                uri: String::from("s3://bucket/checkpoint-1"),
-                checksum_sha256: String::from("checksum"),
-                byte_size: 1024,
-                market_sequences: vec![protocol::engine::MarketSequence {
-                    market_id: 7,
-                    engine_sequence: 43,
-                }],
-            });
-
-        let entry = engine_event_log_entry(&event).expect("event should serialize");
-
-        assert_eq!(entry.engine_event_id, "checkpoint:checkpoint-1");
-        assert_eq!(entry.event_type, "EngineCheckpointCommitted");
-        assert_eq!(entry.market_id, None);
-        assert_eq!(entry.engine_sequence, None);
-        assert_eq!(entry.engine_timestamp_ms, 1_710_000_000_002);
     }
 
     fn liquidation_trade_event() -> TradeExecuted {

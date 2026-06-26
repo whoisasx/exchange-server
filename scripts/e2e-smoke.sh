@@ -16,8 +16,6 @@ API_URL="${SERVER_URL}/api"
 WS_URL="ws://127.0.0.1:${WS_PORT}/ws"
 E2E_MARK_INPUT_ID="${E2E_MARK_INPUT_ID:-${PROJECT_NAME}-mark-price-smoke}"
 LOG_DIR="$ROOT_DIR/target/e2e-smoke"
-ORDERBOOK_ARCHIVE_LOCAL_ROOT="$LOG_DIR/orderbook-archive-objects"
-ORDERBOOK_ARCHIVER_OFFSET_LOCAL_ROOT="$LOG_DIR/orderbook-archiver-offsets"
 CPP_ENGINE_BUILD_DIR="${E2E_CPP_ENGINE_BUILD_DIR:-$LOG_DIR/cpp-engine-build}"
 CPP_ENGINE_BROKERS="${E2E_CPP_ENGINE_BROKERS:-${CEX_ENGINE_BOOTSTRAP_SERVERS:-127.0.0.1:${REDPANDA_PORT}}}"
 CPP_ENGINE_GROUP_ID="${E2E_CPP_ENGINE_GROUP_ID:-${CEX_ENGINE_GROUP_ID:-${PROJECT_NAME}-cpp-engine}}"
@@ -224,8 +222,6 @@ start_service() {
       REDPANDA_BROKERS="127.0.0.1:${REDPANDA_PORT}" \
       SERVER_REPLY_PARTITION="0" \
       REQUEST_WAIT_TIMEOUT_MS="${E2E_REQUEST_WAIT_TIMEOUT_MS:-8000}" \
-      ORDERBOOK_ARCHIVE_LOCAL_ROOT="$ORDERBOOK_ARCHIVE_LOCAL_ROOT" \
-      ORDERBOOK_ARCHIVER_OFFSET_LOCAL_ROOT="$ORDERBOOK_ARCHIVER_OFFSET_LOCAL_ROOT" \
       "$ROOT_DIR/target/debug/$binary"
   ) >"$log_file" 2>&1 &
 
@@ -492,9 +488,6 @@ need_command cmake
 
 mkdir -p "$LOG_DIR"
 rm -f "$LOG_DIR"/*.log
-rm -rf \
-  "$ORDERBOOK_ARCHIVE_LOCAL_ROOT" \
-  "$ORDERBOOK_ARCHIVER_OFFSET_LOCAL_ROOT"
 if [[ "$CPP_ENGINE_CHECKPOINT_DIR_MANAGED" == "1" ]]; then
   rm -rf "$CPP_ENGINE_CHECKPOINT_DIR"
 fi
@@ -519,7 +512,7 @@ done
 echo "building e2e binaries"
 (
   cd "$ROOT_DIR"
-  cargo build -p wallet -p projector -p timeseries -p orderbook-archiver -p ws -p ledger -p server -p engine-ingress -p e2e-smoke
+  cargo build -p wallet -p projector -p timeseries -p ws -p ledger -p server -p engine-ingress -p e2e-smoke
 )
 echo "building C++ engine_app"
 build_cpp_engine_app
@@ -528,7 +521,6 @@ echo "starting exchange services"
 start_service wallet
 start_service projector
 start_service timeseries
-start_service orderbook-archiver
 start_service ledger
 start_cpp_engine
 start_service ws

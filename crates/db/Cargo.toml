@@ -6,5 +6,4 @@ edition = "2024"
 [dependencies]
 sqlx = {workspace = true}
 chrono={workspace = true}
-config = {path = "../../crates/config"}
 serde={workspace = true}

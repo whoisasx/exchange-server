@@ -200,14 +200,11 @@ fn engine_event_market_id(event: &EngineEvent) -> Option<i64> {
         EngineEvent::FundingPaymentApplied(event) => Some(event.market_id),
         EngineEvent::PositionChanged(event) => Some(event.market_id),
         EngineEvent::RiskStateUpdated(event) => Some(event.market_id),
-        EngineEvent::FeeCharged(event) => Some(event.market_id),
         EngineEvent::LiquidationStarted(event) => Some(event.market_id),
         EngineEvent::LiquidationExecuted(event) => Some(event.market_id),
         EngineEvent::LiquidationCompleted(event) => Some(event.market_id),
         EngineEvent::AdlExecuted(event) => Some(event.market_id),
         EngineEvent::AccountDelta(event) => Some(event.market_id),
-        EngineEvent::OrderBookSnapshotCreated(event) => Some(event.market_id),
-        EngineEvent::EngineCheckpointCommitted(_) => None,
     }
 }
 
@@ -246,9 +243,6 @@ fn engine_event_account_user_ids(event: &EngineEvent) -> BTreeSet<i64> {
         EngineEvent::RiskStateUpdated(event) => {
             user_ids.insert(event.user_id);
         }
-        EngineEvent::FeeCharged(event) => {
-            user_ids.insert(event.user_id);
-        }
         EngineEvent::LiquidationStarted(event) => {
             user_ids.insert(event.user_id);
         }
@@ -265,8 +259,6 @@ fn engine_event_account_user_ids(event: &EngineEvent) -> BTreeSet<i64> {
         EngineEvent::AccountDelta(event) => {
             user_ids.insert(event.user_id);
         }
-        EngineEvent::OrderBookSnapshotCreated(_) => {}
-        EngineEvent::EngineCheckpointCommitted(_) => {}
     }
 
     user_ids
@@ -420,54 +412,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![42, 44]
         );
-    }
-
-    #[test]
-    fn orderbook_snapshot_is_market_only() {
-        let event = engine_event(json!({
-            "type": "OrderBookSnapshotCreated",
-            "payload": {
-                "market_id": 1,
-                "engine_sequence": 114,
-                "engine_timestamp_ms": 1710000300000_i64,
-                "snapshot_id": "orderbook_SOL-PERP_1710000300",
-                "uri": "s3://exchange-market-data/orderbooks/market_id=1/1710000300.json.zst",
-                "checksum_sha256": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92",
-                "byte_size": 4096,
-                "schema_version": 1,
-                "last_engine_sequence": 114
-            }
-        }));
-
-        assert_eq!(engine_event_market_id(&event), Some(1));
-        assert!(engine_event_account_user_ids(&event).is_empty());
-    }
-
-    #[test]
-    fn engine_checkpoint_has_no_live_websocket_route() {
-        let event = engine_event(json!({
-            "type": "EngineCheckpointCommitted",
-            "payload": {
-                "checkpoint_id": "engine_checkpoint_1710000300",
-                "engine_timestamp_ms": 1710000300000_i64,
-                "schema_version": 1,
-                "engine_build": "cxx-engine-dev",
-                "config_hash": "cfg_001",
-                "engine_input_next_offset": 1301,
-                "uri": "s3://exchange-engine-checkpoints/checkpoint_1710000300.bin.zst",
-                "checksum_sha256": "8843d7f92416211de9ebb963ff4ce28125932878c1f5f96a6b8c7d38f0b4b90f",
-                "byte_size": 1048576,
-                "market_sequences": [
-                    {
-                        "market_id": 1,
-                        "engine_sequence": 114
-                    }
-                ]
-            }
-        }));
-
-        assert_eq!(engine_event_market_id(&event), None);
-        assert!(engine_event_account_user_ids(&event).is_empty());
     }
 
     fn engine_event(value: serde_json::Value) -> EngineEvent {

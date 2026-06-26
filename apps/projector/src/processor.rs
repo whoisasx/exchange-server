@@ -115,14 +115,11 @@ impl ProjectorProcessor {
             | EngineEvent::FundingPaymentApplied(_)
             | EngineEvent::PositionChanged(_)
             | EngineEvent::RiskStateUpdated(_)
-            | EngineEvent::FeeCharged(_)
             | EngineEvent::LiquidationStarted(_)
             | EngineEvent::LiquidationExecuted(_)
             | EngineEvent::LiquidationCompleted(_)
             | EngineEvent::AdlExecuted(_)
-            | EngineEvent::AccountDelta(_)
-            | EngineEvent::OrderBookSnapshotCreated(_)
-            | EngineEvent::EngineCheckpointCommitted(_)) => {
+            | EngineEvent::AccountDelta(_)) => {
                 self.repository
                     .project_engine_event_log(&event, topic, partition, next_offset)
                     .await

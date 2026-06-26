@@ -21,8 +21,8 @@ a different engine repository.
 
 The script starts local Postgres and Redpanda with Docker Compose, creates stream
 topics, builds `engine_app`, starts `wallet`, `projector`, `timeseries`,
-`orderbook-archiver`, `ledger`, `cpp-engine`, `ws`, and `server`, then drives
-the REST and websocket flow with `apps/e2e-smoke`.
+`ledger`, `cpp-engine`, `ws`, and `server`, then drives the REST and websocket
+flow with `apps/e2e-smoke`.
 
 The harness provisions `engine.input` as a single-partition topic with
 `retention.ms=1800000`, writes a two-market C++ engine config for `SOL-PERP`
