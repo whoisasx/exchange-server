@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Asset, CommandEnvelope, OrderType, PositionSide, Side};
 
 pub const ENGINE_INPUT_TOPIC: &str = "engine.input";
-pub const ENGINE_COMMANDS_TOPIC: &str = ENGINE_INPUT_TOPIC;
-pub const ENGINE_COMMANDS_LEGACY_TOPIC: &str = "engine.commands";
 pub const ENGINE_REPLIES_TOPIC: &str = "engine.replies";
 pub const ENGINE_EVENTS_TOPIC: &str = "engine.events";
 
@@ -593,10 +591,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn engine_input_topic_is_target_topic_with_legacy_alias() {
+    fn engine_input_topic_is_stable() {
         assert_eq!(ENGINE_INPUT_TOPIC, "engine.input");
-        assert_eq!(ENGINE_COMMANDS_TOPIC, ENGINE_INPUT_TOPIC);
-        assert_eq!(ENGINE_COMMANDS_LEGACY_TOPIC, "engine.commands");
     }
 
     #[test]

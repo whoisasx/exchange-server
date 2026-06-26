@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let processor = WalletProcessor::new_with_topics(
         repository.clone(),
         settings.wallet_events_topic.clone(),
-        settings.engine_commands_topic.clone(),
+        settings.engine_input_topic.clone(),
     );
     let worker = WalletWorker::new(settings, processor, repository);
 

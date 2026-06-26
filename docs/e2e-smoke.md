@@ -22,12 +22,12 @@ a different engine repository.
 The script starts local Postgres and Redpanda with Docker Compose, creates stream
 topics, builds `engine_app`, starts `wallet`, `projector`, `timeseries`,
 `ledger`, `cpp-engine`, `ws`, and `server`, then drives the REST and websocket
-flow with `apps/e2e-smoke`.
+flow with `tools/e2e-smoke`.
 
 The harness provisions `engine.input` as a single-partition topic with
 `retention.ms=1800000`, writes a two-market C++ engine config for `SOL-PERP`
 and `ETH-PERP`, and uses an isolated checkpoint/build directory under
-`target/e2e-smoke`. It queues one mark-price input through `engine-ingress` and
+`target/e2e-smoke`. It queues one mark-price input through `tools/engine-ingress` and
 verifies the wallet outbox relay publishes that row. The smoke driver also waits
 for `wallet_outbox` to drain and checks that ledger rows consumed from
 `wallet.events` have unique logical event ids.

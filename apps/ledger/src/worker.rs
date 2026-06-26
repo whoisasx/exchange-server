@@ -99,8 +99,8 @@ impl LedgerWorker {
 
     pub async fn run(&self) -> Result<(), LedgerError> {
         println!(
-            "ledger starting: group '{}' consuming '{}'",
-            self.settings.consumer_group, self.settings.wallet_events_topic
+            "ledger starting: consuming '{}'",
+            self.settings.wallet_events_topic
         );
 
         let queue = LedgerQueue::new(&self.settings)

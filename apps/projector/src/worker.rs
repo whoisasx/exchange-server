@@ -146,8 +146,7 @@ impl ProjectorWorker {
 
     pub async fn run(&self) -> Result<(), ProjectorError> {
         println!(
-            "projector starting: group '{}' consuming '{}', '{}', '{}', and '{}'",
-            self.settings.consumer_group,
+            "projector starting: consuming '{}', '{}', '{}', and '{}'",
             self.settings.engine_input_topic,
             self.settings.engine_replies_topic,
             self.settings.engine_events_topic,

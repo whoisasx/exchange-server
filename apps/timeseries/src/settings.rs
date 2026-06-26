@@ -6,7 +6,6 @@ use protocol::engine;
 pub struct TimeseriesSettings {
     pub database_url: String,
     pub redpanda_brokers: String,
-    pub consumer_group: String,
     pub engine_events_topic: String,
 }
 
@@ -18,7 +17,6 @@ impl TimeseriesSettings {
                 "postgres://postgres:postgres@localhost:5432/exchange",
             ),
             redpanda_brokers: env_or_default("REDPANDA_BROKERS", "localhost:9092"),
-            consumer_group: env_or_default("TIMESERIES_CONSUMER_GROUP", "timeseries-service"),
             engine_events_topic: env_or_default("ENGINE_EVENTS_TOPIC", engine::ENGINE_EVENTS_TOPIC),
         }
     }

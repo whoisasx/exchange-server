@@ -31,7 +31,7 @@ async fn main() -> Result<(), String> {
 
     let command_name = command_name(&command);
     let settings = WalletSettings::from_env();
-    let outbox_message = engine_command_outbox_message(&command, &settings.engine_commands_topic)?;
+    let outbox_message = engine_command_outbox_message(&command, &settings.engine_input_topic)?;
     let dedupe_key = outbox_message.dedupe_key.clone();
 
     let pool = PgPoolOptions::new()
@@ -53,12 +53,12 @@ async fn main() -> Result<(), String> {
     if let Some(outbox_id) = outbox_id {
         println!(
             "queued {command_name} to wallet_outbox row {outbox_id} for '{}'",
-            settings.engine_commands_topic
+            settings.engine_input_topic
         );
     } else {
         println!(
             "engine input already queued for dedupe key '{dedupe_key}' on '{}'",
-            settings.engine_commands_topic
+            settings.engine_input_topic
         );
     }
 

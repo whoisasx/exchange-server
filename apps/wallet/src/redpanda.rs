@@ -115,8 +115,8 @@ struct WalletOutboxRelay {
     repository: WalletRepository,
     wallet_events_topic: String,
     wallet_events: TopicProducer,
-    engine_commands_topic: String,
-    engine_commands: TopicProducer,
+    engine_input_topic: String,
+    engine_inputs: TopicProducer,
     batch_limit: i64,
     stale_after_seconds: i64,
     metrics_interval: Duration,
@@ -137,15 +137,15 @@ impl WalletOutboxRelay {
         let topics = client.list_topics().await?;
         let wallet_events =
             TopicProducer::new(&client, &topics, settings.wallet_events_topic.clone()).await?;
-        let engine_commands =
-            TopicProducer::new(&client, &topics, settings.engine_commands_topic.clone()).await?;
+        let engine_inputs =
+            TopicProducer::new(&client, &topics, settings.engine_input_topic.clone()).await?;
 
         Ok(Self {
             repository,
             wallet_events_topic: settings.wallet_events_topic.clone(),
             wallet_events,
-            engine_commands_topic: settings.engine_commands_topic.clone(),
-            engine_commands,
+            engine_input_topic: settings.engine_input_topic.clone(),
+            engine_inputs,
             batch_limit: settings.wallet_outbox_batch_limit.max(1),
             stale_after_seconds: settings.wallet_outbox_stale_after_seconds.max(1),
             metrics_interval: Duration::from_secs(
@@ -161,7 +161,7 @@ impl WalletOutboxRelay {
     async fn run(self) -> Result<(), QueueError> {
         println!(
             "wallet outbox relay publishing '{}' and '{}'",
-            self.wallet_events_topic, self.engine_commands_topic
+            self.wallet_events_topic, self.engine_input_topic
         );
 
         let mut next_metrics_at = Instant::now();
@@ -256,8 +256,8 @@ impl WalletOutboxRelay {
         if topic == self.wallet_events_topic {
             return Ok(&self.wallet_events);
         }
-        if topic == self.engine_commands_topic {
-            return Ok(&self.engine_commands);
+        if topic == self.engine_input_topic {
+            return Ok(&self.engine_inputs);
         }
 
         Err(QueueError::OutboxTopicNotConfigured(String::from(topic)))

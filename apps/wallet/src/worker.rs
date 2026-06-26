@@ -104,7 +104,7 @@ impl WalletWorker {
     pub async fn run(&self) -> Result<(), WalletError> {
         println!(
             "wallet worker starting: consuming '{}' and forwarding valid inputs to '{}'",
-            self.settings.wallet_commands_topic, self.settings.engine_commands_topic
+            self.settings.wallet_commands_topic, self.settings.engine_input_topic
         );
 
         let queue = WalletQueue::new(&self.settings)

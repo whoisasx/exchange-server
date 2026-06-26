@@ -3,8 +3,6 @@ resolver = "3"
 
 members = [
   "apps/server",
-  "apps/e2e-smoke",
-  "apps/engine-ingress",
   "apps/ledger",
   "apps/projector",
   "apps/wallet",
@@ -13,6 +11,8 @@ members = [
   "crates/config",
   "crates/db",
   "crates/protocol",
+  "tools/e2e-smoke",
+  "tools/engine-ingress",
 ]
 
 [workspace.dependencies]

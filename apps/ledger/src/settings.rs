@@ -6,7 +6,6 @@ use protocol::wallet;
 pub struct LedgerSettings {
     pub database_url: String,
     pub redpanda_brokers: String,
-    pub consumer_group: String,
     pub wallet_events_topic: String,
 }
 
@@ -18,7 +17,6 @@ impl LedgerSettings {
                 "postgres://postgres:postgres@localhost:5432/exchange",
             ),
             redpanda_brokers: env_or_default("REDPANDA_BROKERS", "localhost:9092"),
-            consumer_group: env_or_default("LEDGER_CONSUMER_GROUP", "ledger-service"),
             wallet_events_topic: env_or_default("WALLET_EVENTS_TOPIC", wallet::WALLET_EVENTS_TOPIC),
         }
     }

@@ -2,7 +2,7 @@
 
 This contract describes the current Rust wire protocol used by this workspace and the intended agreement with the external C++ matching engine.
 
-The Rust protocol uses `engine.input` for engine-affecting inputs. `ENGINE_COMMANDS_TOPIC` remains an alias for `ENGINE_INPUT_TOPIC`, and `ENGINE_COMMANDS_LEGACY_TOPIC` names the old `engine.commands` topic for compatibility.
+The Rust protocol uses `engine.input` for engine-affecting inputs.
 
 Documentation is flattened under `docs/`. JSON examples and protocol fixtures live under `docs/examples/`.
 
@@ -29,10 +29,10 @@ All stream messages are JSON encoded with this shape:
 | `engine.replies` | C++ engine | server reply consumer | Request lifecycle replies only. |
 | `engine.events` | C++ engine | wallet, projector, websocket, timeseries | Durable engine facts and state changes. |
 
-Wallet and `engine-ingress` enqueue engine-affecting inputs into
+Wallet and `tools/engine-ingress` enqueue engine-affecting inputs into
 `wallet_outbox`; the wallet outbox relay is the only Redpanda publisher for
 `engine.input`. Wallet owns the hot-path reservation flow for orders and
-cancels. `engine-ingress` owns pass-through mark price and funding inputs.
+cancels. `tools/engine-ingress` owns pass-through mark price and funding inputs.
 
 ## Topic Provisioning
 

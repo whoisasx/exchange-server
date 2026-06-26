@@ -10,4 +10,4 @@ protocol = { path = "../../crates/protocol" }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
-wallet = { path = "../wallet" }
+wallet = { path = "../../apps/wallet" }

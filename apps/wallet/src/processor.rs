@@ -24,7 +24,7 @@ use crate::{
 pub struct WalletProcessResult {
     pub wallet_replies: Vec<WalletReply>,
     pub wallet_events: Vec<WalletEvent>,
-    pub engine_commands: Vec<EngineCommand>,
+    pub engine_inputs: Vec<EngineCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +48,7 @@ pub struct ApplyAccountDelta {
 pub struct WalletProcessor {
     repository: WalletRepository,
     wallet_events_topic: String,
-    engine_commands_topic: String,
+    engine_input_topic: String,
 }
 
 impl WalletProcessor {
@@ -63,12 +63,12 @@ impl WalletProcessor {
     pub fn new_with_topics(
         repository: WalletRepository,
         wallet_events_topic: impl Into<String>,
-        engine_commands_topic: impl Into<String>,
+        engine_input_topic: impl Into<String>,
     ) -> Self {
         Self {
             repository,
             wallet_events_topic: wallet_events_topic.into(),
-            engine_commands_topic: engine_commands_topic.into(),
+            engine_input_topic: engine_input_topic.into(),
         }
     }
 
@@ -119,7 +119,7 @@ impl WalletProcessor {
                 Ok(WalletProcessResult {
                     wallet_replies: vec![reply],
                     wallet_events: vec![event],
-                    engine_commands: Vec::new(),
+                    engine_inputs: Vec::new(),
                 })
             }
             WalletAction::ApplyWithdrawal(withdraw) => {
@@ -177,7 +177,7 @@ impl WalletProcessor {
                         return Ok(WalletProcessResult {
                             wallet_replies: vec![reply],
                             wallet_events: Vec::new(),
-                            engine_commands: Vec::new(),
+                            engine_inputs: Vec::new(),
                         });
                     }
                     Err(error) => return Err(error),
@@ -188,7 +188,7 @@ impl WalletProcessor {
                 Ok(WalletProcessResult {
                     wallet_replies: vec![reply],
                     wallet_events: vec![event],
-                    engine_commands: Vec::new(),
+                    engine_inputs: Vec::new(),
                 })
             }
             WalletAction::ReleaseReservation(release) => self.release_reservation(release).await,
@@ -226,7 +226,7 @@ impl WalletProcessor {
         }
 
         let wallet_events_topic = self.wallet_events_topic.clone();
-        let engine_commands_topic = self.engine_commands_topic.clone();
+        let engine_input_topic = self.engine_input_topic.clone();
         let wallet_key = intent.envelope.user_id.to_string();
         let engine_dedupe_key = format!(
             "engine-input:place-order:{}:{}",
@@ -259,7 +259,7 @@ impl WalletProcessor {
                         &event,
                     )?;
                     let engine_outbox = engine_command_outbox_message(
-                        &engine_commands_topic,
+                        &engine_input_topic,
                         engine_dedupe_key.clone(),
                         &engine_command,
                     )?;
@@ -292,7 +292,7 @@ impl WalletProcessor {
                 return Ok(WalletProcessResult {
                     wallet_replies: vec![reply],
                     wallet_events: Vec::new(),
-                    engine_commands: Vec::new(),
+                    engine_inputs: Vec::new(),
                 });
             }
             Err(error) => return Err(error),
@@ -310,7 +310,7 @@ impl WalletProcessor {
         Ok(WalletProcessResult {
             wallet_replies: vec![reply],
             wallet_events: vec![event],
-            engine_commands: vec![engine_command],
+            engine_inputs: vec![engine_command],
         })
     }
 
@@ -335,7 +335,7 @@ impl WalletProcessor {
         });
         let engine_command = EngineCommand::CancelOrder(intent.clone().into_engine_cancel_order());
         let engine_outbox = engine_command_outbox_message(
-            &self.engine_commands_topic,
+            &self.engine_input_topic,
             format!(
                 "engine-input:cancel-order:{}:{}",
                 intent.envelope.user_id, intent.envelope.idempotency_key
@@ -357,7 +357,7 @@ impl WalletProcessor {
         Ok(WalletProcessResult {
             wallet_replies: vec![reply],
             wallet_events: Vec::new(),
-            engine_commands: vec![engine_command],
+            engine_inputs: vec![engine_command],
         })
     }
 
@@ -389,7 +389,7 @@ impl WalletProcessor {
         Ok(WalletProcessResult {
             wallet_replies: Vec::new(),
             wallet_events: vec![event],
-            engine_commands: Vec::new(),
+            engine_inputs: Vec::new(),
         })
     }
 
@@ -421,7 +421,7 @@ impl WalletProcessor {
         Ok(WalletProcessResult {
             wallet_replies: Vec::new(),
             wallet_events: vec![event],
-            engine_commands: Vec::new(),
+            engine_inputs: Vec::new(),
         })
     }
 
@@ -465,7 +465,7 @@ impl WalletProcessor {
         Ok(WalletProcessResult {
             wallet_replies: Vec::new(),
             wallet_events: vec![event],
-            engine_commands: Vec::new(),
+            engine_inputs: Vec::new(),
         })
     }
 
@@ -529,7 +529,7 @@ fn reply_result(reply: WalletReply) -> WalletProcessResult {
     WalletProcessResult {
         wallet_replies: vec![reply],
         wallet_events: Vec::new(),
-        engine_commands: Vec::new(),
+        engine_inputs: Vec::new(),
     }
 }
 

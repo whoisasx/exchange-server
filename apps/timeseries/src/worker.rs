@@ -118,8 +118,8 @@ impl TimeseriesWorker {
 
     pub async fn run(&self) -> Result<(), TimeseriesError> {
         println!(
-            "timeseries starting: group '{}' consuming '{}'",
-            self.settings.consumer_group, self.settings.engine_events_topic
+            "timeseries starting: consuming '{}'",
+            self.settings.engine_events_topic
         );
 
         let queue = TimeseriesQueue::new(&self.settings)

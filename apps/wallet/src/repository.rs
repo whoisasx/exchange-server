@@ -1692,7 +1692,7 @@ mod tests {
     fn wallet_outbox_message_serializes_json_payload() {
         let message = NewWalletOutboxMessage::json(
             "engine-command:res-1",
-            "engine.commands",
+            "engine.input",
             None,
             "input-1",
             "EngineCommand",
@@ -1706,7 +1706,7 @@ mod tests {
         .expect("outbox payload should serialize");
 
         assert_eq!(message.dedupe_key, "engine-command:res-1");
-        assert_eq!(message.topic, "engine.commands");
+        assert_eq!(message.topic, "engine.input");
         assert_eq!(message.partition, None);
         assert_eq!(message.message_key, "input-1");
         assert_eq!(message.payload_type, "EngineCommand");
