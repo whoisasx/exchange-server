@@ -183,20 +183,36 @@ impl WalletOutboxRelay {
             }
 
             for message in messages {
-                if let Err(error) = self.publish_message(&message).await {
-                    let error_message = error.to_string();
-                    eprintln!(
-                        "wallet outbox publish failed for row {}: {}",
-                        message.outbox_id, error_message
-                    );
-                    self.repository
-                        .mark_outbox_pending(message.outbox_id, &error_message)
-                        .await?;
-                    continue;
-                }
+                let published = match self.publish_message(&message).await {
+                    Ok(published) => published,
+                    Err(error) => {
+                        let error_message = error.to_string();
+                        eprintln!(
+                            "wallet outbox publish failed for row {}: {}",
+                            message.outbox_id, error_message
+                        );
+                        self.repository
+                            .mark_outbox_pending(message.outbox_id, &error_message)
+                            .await?;
+                        continue;
+                    }
+                };
+
+                let trace = outbox_payload_trace(&message.payload);
+                println!(
+                    "wallet outbox published outbox_id={} topic={}[{}]@{} message_key={} payload_type={} request_id={} idempotency_key={}",
+                    message.outbox_id,
+                    message.topic,
+                    published.partition,
+                    published.offset,
+                    message.message_key,
+                    message.payload_type,
+                    trace.request_id.unwrap_or("-"),
+                    trace.idempotency_key.unwrap_or("-")
+                );
 
                 self.repository
-                    .mark_outbox_published(message.outbox_id)
+                    .mark_outbox_published(message.outbox_id, published.partition, published.offset)
                     .await?;
             }
         }
@@ -238,7 +254,10 @@ impl WalletOutboxRelay {
         Ok(())
     }
 
-    async fn publish_message(&self, message: &WalletOutboxMessage) -> Result<(), QueueError> {
+    async fn publish_message(
+        &self,
+        message: &WalletOutboxMessage,
+    ) -> Result<ProducedRecord, QueueError> {
         let producer = self.producer_for_topic(&message.topic)?;
 
         if let Some(partition) = message.partition {
@@ -316,6 +335,12 @@ async fn run_command_partition(
             };
 
             let metadata = CommandMetadata::from_command(&command);
+            println!(
+                "wallet command consumed request_id={} idempotency_key={} source={topic}[{partition}]@{}",
+                metadata.reply_key,
+                command_idempotency_key(&command).unwrap_or("-"),
+                record.offset
+            );
             let result = worker.process_command(command).await?;
             publishers.publish_result(metadata, result).await?;
             worker
@@ -421,6 +446,12 @@ struct TopicProducer {
     producers: Vec<(i32, Arc<BatchProducer<RecordAggregator>>)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProducedRecord {
+    partition: i32,
+    offset: i64,
+}
+
 impl TopicProducer {
     async fn new(client: &Client, topics: &[Topic], topic: String) -> Result<Self, QueueError> {
         let partitions = topic_partitions(topics, &topic)?;
@@ -441,7 +472,11 @@ impl TopicProducer {
         Ok(Self { topic, producers })
     }
 
-    async fn publish_json<T: Serialize>(&self, key: &str, value: &T) -> Result<(), QueueError> {
+    async fn publish_json<T: Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+    ) -> Result<ProducedRecord, QueueError> {
         let payload = serde_json::to_vec(value)?;
         let record = Record {
             key: Some(key.as_bytes().to_vec()),
@@ -449,10 +484,10 @@ impl TopicProducer {
             headers: BTreeMap::new(),
             timestamp: Utc::now(),
         };
-        let producer = self.producer_for_key(key);
+        let (partition, producer) = self.producer_for_key(key);
 
-        producer.produce(record).await?;
-        Ok(())
+        let offset = producer.produce(record).await?;
+        Ok(ProducedRecord { partition, offset })
     }
 
     async fn publish_json_to_partition<T: Serialize>(
@@ -460,7 +495,7 @@ impl TopicProducer {
         partition: i32,
         key: &str,
         value: &T,
-    ) -> Result<(), QueueError> {
+    ) -> Result<ProducedRecord, QueueError> {
         let payload = serde_json::to_vec(value)?;
         let record = Record {
             key: Some(key.as_bytes().to_vec()),
@@ -470,13 +505,14 @@ impl TopicProducer {
         };
         let producer = self.producer_for_partition(partition)?;
 
-        producer.produce(record).await?;
-        Ok(())
+        let offset = producer.produce(record).await?;
+        Ok(ProducedRecord { partition, offset })
     }
 
-    fn producer_for_key(&self, key: &str) -> &BatchProducer<RecordAggregator> {
+    fn producer_for_key(&self, key: &str) -> (i32, &BatchProducer<RecordAggregator>) {
         let index = stable_partition(key.as_bytes(), self.producers.len());
-        &self.producers[index].1
+        let (partition, producer) = &self.producers[index];
+        (*partition, producer)
     }
 
     fn producer_for_partition(
@@ -491,6 +527,40 @@ impl TopicProducer {
                 topic: self.topic.clone(),
                 partition,
             })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PayloadTrace<'a> {
+    request_id: Option<&'a str>,
+    idempotency_key: Option<&'a str>,
+}
+
+fn outbox_payload_trace(payload: &serde_json::Value) -> PayloadTrace<'_> {
+    PayloadTrace {
+        request_id: first_payload_string(
+            payload,
+            &["/payload/envelope/request_id", "/payload/request_id"],
+        ),
+        idempotency_key: first_payload_string(payload, &["/payload/envelope/idempotency_key"]),
+    }
+}
+
+fn first_payload_string<'a>(payload: &'a serde_json::Value, pointers: &[&str]) -> Option<&'a str> {
+    pointers
+        .iter()
+        .find_map(|pointer| payload.pointer(pointer).and_then(serde_json::Value::as_str))
+}
+
+fn command_idempotency_key(command: &WalletCommand) -> Option<&str> {
+    match command {
+        WalletCommand::PlaceOrderIntent(command) => Some(command.envelope.idempotency_key.as_str()),
+        WalletCommand::CancelOrderIntent(command) => {
+            Some(command.envelope.idempotency_key.as_str())
+        }
+        WalletCommand::Deposit(command) => Some(command.envelope.idempotency_key.as_str()),
+        WalletCommand::Withdraw(command) => Some(command.envelope.idempotency_key.as_str()),
+        WalletCommand::ReleaseReservation(_) | WalletCommand::SettleTrade(_) => None,
     }
 }
 
@@ -820,7 +890,7 @@ mod tests {
         wallet::{Deposit, PlaceOrderIntent, ReleaseReservation, SettleTrade},
     };
 
-    use crate::engine_inputs::{DEFAULT_ENGINE_INPUT_KEY, EngineInputPublication};
+    use crate::engine_inputs::EngineInputPublication;
 
     use super::*;
 
@@ -871,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_input_key_uses_constant_key_without_input_id() {
+    fn engine_input_key_uses_command_input_id() {
         let command = EngineCommand::PlaceOrder(
             PlaceOrderIntent {
                 envelope: CommandEnvelope {
@@ -897,7 +967,7 @@ mod tests {
 
         let publication = EngineInputPublication::new(command);
 
-        assert_eq!(publication.key(), DEFAULT_ENGINE_INPUT_KEY);
+        assert_eq!(publication.key(), "engine-input:place-order:42:order-1");
     }
 
     #[test]

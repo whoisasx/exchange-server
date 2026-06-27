@@ -25,7 +25,8 @@ const IDLE_SLEEP: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 pub struct RedpandaProducer {
-    wallet_commands: Vec<Arc<BatchProducer<RecordAggregator>>>,
+    wallet_commands_topic: String,
+    wallet_commands: Vec<(i32, Arc<BatchProducer<RecordAggregator>>)>,
 }
 
 impl RedpandaProducer {
@@ -64,19 +65,22 @@ impl RedpandaProducer {
             let producer = BatchProducerBuilder::new(partition_client)
                 .with_linger(Duration::from_millis(0))
                 .build(RecordAggregator::new(1024 * 1024));
-            wallet_commands.push(Arc::new(producer));
+            wallet_commands.push((partition, Arc::new(producer)));
         }
 
-        Ok(Self { wallet_commands })
+        Ok(Self {
+            wallet_commands_topic,
+            wallet_commands,
+        })
     }
 
     pub async fn publish_wallet_command(
         &self,
         key: &str,
         command: &WalletCommand,
-    ) -> Result<(), PublishError> {
+    ) -> Result<ProducedRecord, PublishError> {
         let payload = serde_json::to_vec(command)?;
-        let producer = self.wallet_producer_for_key(key);
+        let (partition, producer) = self.wallet_producer_for_key(key);
         let record = Record {
             key: Some(key.as_bytes().to_vec()),
             value: Some(payload),
@@ -84,14 +88,32 @@ impl RedpandaProducer {
             timestamp: Utc::now(),
         };
 
-        producer.produce(record).await?;
-        Ok(())
+        let offset = producer.produce(record).await?;
+        let produced = ProducedRecord { partition, offset };
+        let trace = wallet_command_trace(command);
+        println!(
+            "server queued wallet command request_id={} idempotency_key={} topic={}[{}]@{}",
+            trace.request_id.unwrap_or("-"),
+            trace.idempotency_key.unwrap_or("-"),
+            self.wallet_commands_topic,
+            produced.partition,
+            produced.offset
+        );
+
+        Ok(produced)
     }
 
-    fn wallet_producer_for_key(&self, key: &str) -> &BatchProducer<RecordAggregator> {
-        let partition = stable_partition(key.as_bytes(), self.wallet_commands.len());
-        &self.wallet_commands[partition]
+    fn wallet_producer_for_key(&self, key: &str) -> (i32, &BatchProducer<RecordAggregator>) {
+        let index = stable_partition(key.as_bytes(), self.wallet_commands.len());
+        let (partition, producer) = &self.wallet_commands[index];
+        (*partition, producer)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProducedRecord {
+    pub partition: i32,
+    pub offset: i64,
 }
 
 pub struct ReplyConsumers {
@@ -198,7 +220,14 @@ async fn consume_wallet_replies(
             };
 
             match serde_json::from_slice::<WalletReply>(&payload) {
-                Ok(reply) => reply_state.resolve_wallet_reply(reply).await,
+                Ok(reply) => {
+                    println!(
+                        "server received wallet reply request_id={} source={topic}[{partition}]@{}",
+                        wallet_reply_request_id(&reply),
+                        record.offset
+                    );
+                    reply_state.resolve_wallet_reply(reply).await
+                }
                 Err(error) => eprintln!(
                     "invalid wallet reply on {topic}[{partition}]@{}: {error}",
                     record.offset
@@ -237,13 +266,112 @@ async fn consume_engine_replies(
             };
 
             match serde_json::from_slice::<EngineReply>(&payload) {
-                Ok(reply) => reply_state.resolve_engine_reply(reply).await,
+                Ok(reply) => {
+                    let trace = engine_reply_trace(&reply);
+                    println!(
+                        "server received engine reply request_id={} source={topic}[{partition}]@{} source_input_id={} source_input_offset={}",
+                        trace.request_id,
+                        record.offset,
+                        trace.source_input_id.unwrap_or("-"),
+                        trace
+                            .source_input_offset
+                            .map(|offset| offset.to_string())
+                            .as_deref()
+                            .unwrap_or("-")
+                    );
+                    reply_state.resolve_engine_reply(reply).await
+                }
                 Err(error) => eprintln!(
                     "invalid engine reply on {topic}[{partition}]@{}: {error}",
                     record.offset
                 ),
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WalletCommandTrace<'a> {
+    request_id: Option<&'a str>,
+    idempotency_key: Option<&'a str>,
+}
+
+fn wallet_command_trace(command: &WalletCommand) -> WalletCommandTrace<'_> {
+    match command {
+        WalletCommand::PlaceOrderIntent(command) => WalletCommandTrace {
+            request_id: Some(command.envelope.request_id.as_str()),
+            idempotency_key: Some(command.envelope.idempotency_key.as_str()),
+        },
+        WalletCommand::CancelOrderIntent(command) => WalletCommandTrace {
+            request_id: Some(command.envelope.request_id.as_str()),
+            idempotency_key: Some(command.envelope.idempotency_key.as_str()),
+        },
+        WalletCommand::Deposit(command) => WalletCommandTrace {
+            request_id: Some(command.envelope.request_id.as_str()),
+            idempotency_key: Some(command.envelope.idempotency_key.as_str()),
+        },
+        WalletCommand::Withdraw(command) => WalletCommandTrace {
+            request_id: Some(command.envelope.request_id.as_str()),
+            idempotency_key: Some(command.envelope.idempotency_key.as_str()),
+        },
+        WalletCommand::ReleaseReservation(_) | WalletCommand::SettleTrade(_) => {
+            WalletCommandTrace {
+                request_id: None,
+                idempotency_key: None,
+            }
+        }
+    }
+}
+
+fn wallet_reply_request_id(reply: &WalletReply) -> &str {
+    match reply {
+        WalletReply::FundsReserved(reply) => reply.request_id.as_str(),
+        WalletReply::InsufficientFunds(reply) => reply.request_id.as_str(),
+        WalletReply::BalanceUpdated(reply) => reply.request_id.as_str(),
+        WalletReply::CommandAccepted(reply) => reply.request_id.as_str(),
+        WalletReply::CommandRejected(reply) => reply.request_id.as_str(),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EngineReplyTrace<'a> {
+    request_id: &'a str,
+    source_input_id: Option<&'a str>,
+    source_input_offset: Option<i64>,
+}
+
+fn engine_reply_trace(reply: &EngineReply) -> EngineReplyTrace<'_> {
+    match reply {
+        EngineReply::OrderAccepted(reply) => EngineReplyTrace {
+            request_id: reply.request_id.as_str(),
+            source_input_id: reply.source_input_id.as_deref(),
+            source_input_offset: reply.source_input_offset,
+        },
+        EngineReply::OrderRejected(reply) => EngineReplyTrace {
+            request_id: reply.request_id.as_str(),
+            source_input_id: reply.source_input_id.as_deref(),
+            source_input_offset: reply.source_input_offset,
+        },
+        EngineReply::CancelAccepted(reply) => EngineReplyTrace {
+            request_id: reply.request_id.as_str(),
+            source_input_id: reply.source_input_id.as_deref(),
+            source_input_offset: reply.source_input_offset,
+        },
+        EngineReply::CancelRejected(reply) => EngineReplyTrace {
+            request_id: reply.request_id.as_str(),
+            source_input_id: reply.source_input_id.as_deref(),
+            source_input_offset: reply.source_input_offset,
+        },
+        EngineReply::LiquidationAccepted(reply) => EngineReplyTrace {
+            request_id: reply.request_id.as_str(),
+            source_input_id: reply.source_input_id.as_deref(),
+            source_input_offset: reply.source_input_offset,
+        },
+        EngineReply::LiquidationRejected(reply) => EngineReplyTrace {
+            request_id: reply.request_id.as_str(),
+            source_input_id: reply.source_input_id.as_deref(),
+            source_input_offset: reply.source_input_offset,
+        },
     }
 }
 

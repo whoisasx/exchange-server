@@ -1,8 +1,12 @@
-use std::{collections::BTreeSet, env, time::Duration};
+use std::{collections::BTreeSet, env, ops::Range, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use reqwest::{Client, StatusCode};
+use rskafka::client::{
+    ClientBuilder,
+    partition::{OffsetAt, PartitionClient, UnknownTopicHandling},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{Pool, Postgres, Row, postgres::PgPoolOptions};
@@ -17,6 +21,9 @@ use tokio_tungstenite::{
 };
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+const KAFKA_FETCH_BYTES: Range<i32> = 1..52_428_800;
+const KAFKA_FETCH_MAX_WAIT_MS: i32 = 500;
 
 #[derive(Debug, Clone, Copy)]
 struct MarketSpec {
@@ -50,6 +57,8 @@ struct Settings {
     server_url: String,
     ws_url: String,
     database_url: String,
+    redpanda_brokers: String,
+    engine_events_topic: String,
     mark_input_id: Option<String>,
 }
 
@@ -58,6 +67,54 @@ struct ApiResponse<T> {
     success: bool,
     info: String,
     body: Option<T>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandTraceKind {
+    Deposit,
+    PlaceOrderIntent,
+}
+
+#[derive(Debug, Clone)]
+struct CommandTrace {
+    user_id: i64,
+    path: String,
+    idempotency_key: String,
+    request_id: String,
+    final_body: Value,
+}
+
+impl CommandTrace {
+    fn kind(&self) -> Option<CommandTraceKind> {
+        match self.path.as_str() {
+            "/balance/" => Some(CommandTraceKind::Deposit),
+            "/orders/" | "/positions/close" => Some(CommandTraceKind::PlaceOrderIntent),
+            _ => None,
+        }
+    }
+
+    fn wallet_command_type(&self) -> Option<&'static str> {
+        match self.kind()? {
+            CommandTraceKind::Deposit => Some("Deposit"),
+            CommandTraceKind::PlaceOrderIntent => Some("PlaceOrderIntent"),
+        }
+    }
+
+    fn expects_engine_input(&self) -> bool {
+        self.kind() == Some(CommandTraceKind::PlaceOrderIntent)
+    }
+
+    fn engine_source_input_id(&self) -> Option<&str> {
+        self.final_body
+            .pointer("/result/payload/payload/source_input_id")
+            .and_then(Value::as_str)
+    }
+
+    fn engine_source_input_offset(&self) -> Option<i64> {
+        self.final_body
+            .pointer("/result/payload/payload/source_input_offset")
+            .and_then(Value::as_i64)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,17 +174,20 @@ async fn main() -> Result<()> {
     subscribe_market(&mut dave_ws, SECONDARY_MARKET).await?;
     subscribe_market(&mut erin_ws, SECONDARY_MARKET).await?;
 
+    let mut command_traces = Vec::new();
+
     for user in [&alice, &bob, &dave, &erin] {
-        deposit_usdc(
+        let trace = deposit_usdc(
             &client,
             &settings.server_url,
             user,
             &format!("deposit-{}", user.username),
         )
         .await?;
+        command_traces.push(trace);
     }
 
-    place_limit_order(
+    let trace = place_limit_order(
         &client,
         &settings.server_url,
         &dave,
@@ -136,6 +196,7 @@ async fn main() -> Result<()> {
         "LONG",
     )
     .await?;
+    command_traces.push(trace);
 
     wait_for_message(
         &dave_ws.messages,
@@ -151,7 +212,7 @@ async fn main() -> Result<()> {
     .await?;
     wait_for_orderbook_snapshot(&client, &settings.server_url, SECONDARY_MARKET).await?;
 
-    place_limit_order(
+    let trace = place_limit_order(
         &client,
         &settings.server_url,
         &alice,
@@ -160,6 +221,7 @@ async fn main() -> Result<()> {
         "LONG",
     )
     .await?;
+    command_traces.push(trace);
 
     wait_for_message(
         &alice_ws.messages,
@@ -200,7 +262,7 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    place_limit_order(
+    let trace = place_limit_order(
         &client,
         &settings.server_url,
         &bob,
@@ -209,6 +271,7 @@ async fn main() -> Result<()> {
         "SHORT",
     )
     .await?;
+    command_traces.push(trace);
 
     wait_for_message(&alice_ws.messages, "alice account trade", is_account_trade).await?;
     wait_for_message(&bob_ws.messages, "bob account trade", is_account_trade).await?;
@@ -265,7 +328,7 @@ async fn main() -> Result<()> {
     wait_for_unlocked_balances(&pool, alice.userid, bob.userid).await?;
     wait_for_ledger_entries(&pool, alice.userid, bob.userid).await?;
 
-    place_limit_order(
+    let trace = place_limit_order(
         &client,
         &settings.server_url,
         &erin,
@@ -274,6 +337,7 @@ async fn main() -> Result<()> {
         "SHORT",
     )
     .await?;
+    command_traces.push(trace);
 
     wait_for_message(&dave_ws.messages, "dave account trade", is_account_trade).await?;
     wait_for_message(&erin_ws.messages, "erin account trade", is_account_trade).await?;
@@ -359,14 +423,15 @@ async fn main() -> Result<()> {
         "created smoke liquidity user {}={}",
         charlie.username, charlie.userid
     );
-    deposit_usdc(
+    let trace = deposit_usdc(
         &client,
         &settings.server_url,
         &charlie,
         &format!("deposit-charlie-{run_id}"),
     )
     .await?;
-    place_limit_order(
+    command_traces.push(trace);
+    let trace = place_limit_order(
         &client,
         &settings.server_url,
         &charlie,
@@ -375,10 +440,12 @@ async fn main() -> Result<()> {
         "LONG",
     )
     .await?;
-    command(
+    command_traces.push(trace);
+    let trace = command(
         &client,
         &settings.server_url,
         &alice.jwt_token,
+        alice.userid,
         &format!("close-alice-{run_id}"),
         "/positions/close",
         json!({
@@ -388,6 +455,7 @@ async fn main() -> Result<()> {
     )
     .await
     .context("alice close position failed")?;
+    command_traces.push(trace);
 
     wait_for_no_open_position_api(
         &client,
@@ -420,6 +488,7 @@ async fn main() -> Result<()> {
     if let Some(mark_input_id) = settings.mark_input_id.as_deref() {
         wait_for_mark_ingress_outbox_published(&pool, mark_input_id).await?;
     }
+    wait_for_command_traces(&pool, &settings, &command_traces).await?;
     wait_for_wallet_outbox_drained(&pool).await?;
     wait_for_wallet_ledger_logical_event_ids(&pool).await?;
 
@@ -437,6 +506,11 @@ impl Settings {
             database_url: env::var("DATABASE_URL").unwrap_or_else(|_| {
                 String::from("postgres://postgres:postgres@127.0.0.1:55432/exchange")
             }),
+            redpanda_brokers: env::var("E2E_REDPANDA_BROKERS")
+                .or_else(|_| env::var("REDPANDA_BROKERS"))
+                .unwrap_or_else(|_| String::from("127.0.0.1:19092")),
+            engine_events_topic: env::var("E2E_ENGINE_EVENTS_TOPIC")
+                .unwrap_or_else(|_| String::from("engine.events")),
             mark_input_id: env::var("E2E_MARK_INPUT_ID").ok(),
         }
     }
@@ -524,11 +598,12 @@ async fn deposit_usdc(
     server_url: &str,
     user: &UserRecord,
     idempotency_key: &str,
-) -> Result<()> {
-    command(
+) -> Result<CommandTrace> {
+    let trace = command(
         client,
         server_url,
         &user.jwt_token,
+        user.userid,
         idempotency_key,
         "/balance/",
         json!({"asset":"USDC","amount":10000,"reference_id":idempotency_key}),
@@ -536,7 +611,7 @@ async fn deposit_usdc(
     .await
     .with_context(|| format!("{} deposit failed", user.username))?;
 
-    Ok(())
+    Ok(trace)
 }
 
 async fn place_limit_order(
@@ -546,11 +621,12 @@ async fn place_limit_order(
     idempotency_key: &str,
     market: MarketSpec,
     side: &str,
-) -> Result<()> {
-    command(
+) -> Result<CommandTrace> {
+    let trace = command(
         client,
         server_url,
         &user.jwt_token,
+        user.userid,
         idempotency_key,
         "/orders/",
         json!({
@@ -567,17 +643,18 @@ async fn place_limit_order(
     .await
     .with_context(|| format!("{} {side} order failed on {}", user.username, market.name))?;
 
-    Ok(())
+    Ok(trace)
 }
 
 async fn command(
     client: &Client,
     server_url: &str,
     token: &str,
+    user_id: i64,
     idempotency_key: &str,
     path: &str,
     body: Value,
-) -> Result<Value> {
+) -> Result<CommandTrace> {
     let response = client
         .post(format!("{server_url}{path}"))
         .bearer_auth(token)
@@ -605,11 +682,57 @@ async fn command(
             .get("request_id")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("queued command missing request_id for {path}"))?;
-        return poll_request(client, server_url, token, request_id).await;
+        let final_body = poll_request(client, server_url, token, request_id).await?;
+        ensure_complete(&final_body, path)?;
+        ensure_engine_trace_if_expected(path, &final_body)?;
+        println!(
+            "command trace path={path} idempotency_key={idempotency_key} request_id={request_id} source_input_id={} source_input_offset={}",
+            final_body
+                .pointer("/result/payload/payload/source_input_id")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            final_body
+                .pointer("/result/payload/payload/source_input_offset")
+                .and_then(Value::as_i64)
+                .map(|offset| offset.to_string())
+                .as_deref()
+                .unwrap_or("-")
+        );
+
+        return Ok(CommandTrace {
+            user_id,
+            path: String::from(path),
+            idempotency_key: String::from(idempotency_key),
+            request_id: String::from(request_id),
+            final_body,
+        });
     }
 
     ensure_complete(&body, path)?;
-    Ok(body)
+    ensure_engine_trace_if_expected(path, &body)?;
+    let request_id = body
+        .get("request_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("completed command missing request_id for {path}"))?;
+    println!(
+        "command trace path={path} idempotency_key={idempotency_key} request_id={request_id} source_input_id={} source_input_offset={}",
+        body.pointer("/result/payload/payload/source_input_id")
+            .and_then(Value::as_str)
+            .unwrap_or("-"),
+        body.pointer("/result/payload/payload/source_input_offset")
+            .and_then(Value::as_i64)
+            .map(|offset| offset.to_string())
+            .as_deref()
+            .unwrap_or("-")
+    );
+
+    Ok(CommandTrace {
+        user_id,
+        path: String::from(path),
+        idempotency_key: String::from(idempotency_key),
+        request_id: String::from(request_id),
+        final_body: body,
+    })
 }
 
 async fn poll_request(
@@ -619,6 +742,7 @@ async fn poll_request(
     request_id: &str,
 ) -> Result<Value> {
     let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last_body = None;
 
     loop {
         let response = client
@@ -641,15 +765,41 @@ async fn poll_request(
                 {
                     return Ok(body);
                 }
+                last_body = Some(body);
             }
         }
 
         if Instant::now() >= deadline {
-            bail!("request {request_id} did not complete");
+            bail!(
+                "request {request_id} did not complete; last_body={}",
+                last_body
+                    .as_ref()
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| String::from("<none>"))
+            );
         }
 
         sleep(Duration::from_millis(500)).await;
     }
+}
+
+fn ensure_engine_trace_if_expected(path: &str, body: &Value) -> Result<()> {
+    if !matches!(path, "/orders/" | "/positions/close") {
+        return Ok(());
+    }
+
+    let source_input_id = body
+        .pointer("/result/payload/payload/source_input_id")
+        .and_then(Value::as_str);
+    let source_input_offset = body
+        .pointer("/result/payload/payload/source_input_offset")
+        .and_then(Value::as_i64);
+
+    if source_input_id.is_none() || source_input_offset.is_none() {
+        bail!("engine reply for {path} missing source trace fields: {body}");
+    }
+
+    Ok(())
 }
 
 fn ensure_complete(body: &Value, label: &str) -> Result<()> {
@@ -1290,6 +1440,340 @@ async fn wait_for_ledger_entries(pool: &Pool<Postgres>, alice: i64, bob: i64) ->
             && count_for("TRADE_CREDIT") == 2)
     })
     .await
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandTraceState {
+    idempotency: bool,
+    wallet_event: bool,
+    engine_input: bool,
+    engine_event: bool,
+}
+
+impl CommandTraceState {
+    fn complete(self) -> bool {
+        self.idempotency && self.wallet_event && self.engine_input && self.engine_event
+    }
+}
+
+async fn wait_for_command_traces(
+    pool: &Pool<Postgres>,
+    settings: &Settings,
+    traces: &[CommandTrace],
+) -> Result<()> {
+    let engine_events =
+        EngineEventScanner::new(&settings.redpanda_brokers, &settings.engine_events_topic)
+            .await
+            .context("failed to initialize engine event trace scanner")?;
+
+    for trace in traces {
+        wait_for_command_trace(pool, &engine_events, trace).await?;
+    }
+
+    Ok(())
+}
+
+async fn wait_for_command_trace(
+    pool: &Pool<Postgres>,
+    engine_events: &EngineEventScanner,
+    trace: &CommandTrace,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    loop {
+        let state = command_trace_state(pool, engine_events, trace).await?;
+        if state.complete() {
+            println!(
+                "command trace verified path={} idempotency_key={} request_id={} source_input_id={} source_input_offset={}",
+                trace.path,
+                trace.idempotency_key,
+                trace.request_id,
+                trace.engine_source_input_id().unwrap_or("-"),
+                trace
+                    .engine_source_input_offset()
+                    .map(|offset| offset.to_string())
+                    .as_deref()
+                    .unwrap_or("-")
+            );
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out verifying command trace path={} idempotency_key={} request_id={} source_input_id={} source_input_offset={} state={:?}",
+                trace.path,
+                trace.idempotency_key,
+                trace.request_id,
+                trace.engine_source_input_id().unwrap_or("-"),
+                trace
+                    .engine_source_input_offset()
+                    .map(|offset| offset.to_string())
+                    .as_deref()
+                    .unwrap_or("-"),
+                state
+            );
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn command_trace_state(
+    pool: &Pool<Postgres>,
+    engine_events: &EngineEventScanner,
+    trace: &CommandTrace,
+) -> Result<CommandTraceState> {
+    let command_type = trace
+        .wallet_command_type()
+        .ok_or_else(|| anyhow!("trace path {} has no wallet command type", trace.path))?;
+    let idempotency = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM wallet_idempotency
+            WHERE user_id=$1
+              AND command_type=$2
+              AND idempotency_key=$3
+              AND request_id=$4
+        )
+        "#,
+    )
+    .bind(trace.user_id)
+    .bind(command_type)
+    .bind(&trace.idempotency_key)
+    .bind(&trace.request_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to check wallet idempotency trace")?;
+
+    let wallet_event = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM wallet_outbox
+            WHERE topic='wallet.events'
+              AND status='PUBLISHED'
+              AND published_partition IS NOT NULL
+              AND published_offset IS NOT NULL
+              AND payload #>> '{payload,request_id}' = $1
+        )
+        "#,
+    )
+    .bind(&trace.request_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to check wallet event outbox trace")?;
+
+    if !trace.expects_engine_input() {
+        return Ok(CommandTraceState {
+            idempotency,
+            wallet_event,
+            engine_input: true,
+            engine_event: true,
+        });
+    }
+
+    let source_input_id = trace
+        .engine_source_input_id()
+        .ok_or_else(|| anyhow!("engine command trace missing source_input_id"))?;
+    let source_input_offset = trace
+        .engine_source_input_offset()
+        .ok_or_else(|| anyhow!("engine command trace missing source_input_offset"))?;
+
+    let engine_input = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM wallet_outbox
+            WHERE topic='engine.input'
+              AND status='PUBLISHED'
+              AND published_partition IS NOT NULL
+              AND published_offset=$3
+              AND payload #>> '{payload,envelope,request_id}' = $1
+              AND payload #>> '{payload,input_id}' = $2
+        )
+        "#,
+    )
+    .bind(&trace.request_id)
+    .bind(source_input_id)
+    .bind(source_input_offset)
+    .fetch_one(pool)
+    .await
+    .context("failed to check engine input outbox trace")?;
+
+    let engine_event = engine_events
+        .has_trace(trace, source_input_id, source_input_offset)
+        .await
+        .context("failed to scan engine events trace")?;
+
+    Ok(CommandTraceState {
+        idempotency,
+        wallet_event,
+        engine_input,
+        engine_event,
+    })
+}
+
+struct EngineEventScanner {
+    topic: String,
+    partitions: Vec<PartitionClient>,
+}
+
+impl EngineEventScanner {
+    async fn new(brokers: &str, topic: &str) -> Result<Self> {
+        let client = ClientBuilder::new(parse_brokers(brokers)?)
+            .client_id("exchange-e2e-smoke-trace")
+            .build()
+            .await
+            .context("failed to build redpanda trace client")?;
+        let topics = client
+            .list_topics()
+            .await
+            .context("failed to list redpanda topics")?;
+        let partitions = topics
+            .iter()
+            .find(|candidate| candidate.name == topic)
+            .map(|topic| topic.partitions.clone())
+            .ok_or_else(|| anyhow!("redpanda topic '{topic}' was not found"))?;
+
+        if partitions.is_empty() {
+            bail!("redpanda topic '{topic}' has no partitions");
+        }
+
+        let mut clients = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            clients.push(
+                client
+                    .partition_client(String::from(topic), partition, UnknownTopicHandling::Retry)
+                    .await
+                    .with_context(|| {
+                        format!("failed to create trace client for {topic}[{partition}]")
+                    })?,
+            );
+        }
+
+        Ok(Self {
+            topic: String::from(topic),
+            partitions: clients,
+        })
+    }
+
+    async fn has_trace(
+        &self,
+        trace: &CommandTrace,
+        source_input_id: &str,
+        source_input_offset: i64,
+    ) -> Result<bool> {
+        for partition in &self.partitions {
+            if self
+                .partition_has_trace(partition, trace, source_input_id, source_input_offset)
+                .await?
+            {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    async fn partition_has_trace(
+        &self,
+        partition: &PartitionClient,
+        trace: &CommandTrace,
+        source_input_id: &str,
+        source_input_offset: i64,
+    ) -> Result<bool> {
+        let partition_id = partition.partition();
+        let mut next_offset = partition
+            .get_offset(OffsetAt::Earliest)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to read {}[{partition_id}] earliest offset",
+                    self.topic
+                )
+            })?;
+        let latest_offset = partition
+            .get_offset(OffsetAt::Latest)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to read {}[{partition_id}] latest offset",
+                    self.topic
+                )
+            })?;
+
+        while next_offset < latest_offset {
+            let (records, high_watermark) = partition
+                .fetch_records(next_offset, KAFKA_FETCH_BYTES, KAFKA_FETCH_MAX_WAIT_MS)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to fetch {}[{partition_id}] from offset {next_offset}",
+                        self.topic
+                    )
+                })?;
+
+            if records.is_empty() {
+                if next_offset >= high_watermark {
+                    break;
+                }
+                continue;
+            }
+
+            for record in records {
+                next_offset = record.offset + 1;
+                let Some(payload) = record.record.value else {
+                    continue;
+                };
+                let Ok(event) = serde_json::from_slice::<Value>(&payload) else {
+                    continue;
+                };
+                if engine_event_matches_trace(&event, trace, source_input_id, source_input_offset) {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+}
+
+fn engine_event_matches_trace(
+    event: &Value,
+    trace: &CommandTrace,
+    source_input_id: &str,
+    source_input_offset: i64,
+) -> bool {
+    event.pointer("/payload/request_id").and_then(Value::as_str) == Some(trace.request_id.as_str())
+        && event
+            .pointer("/payload/source_input_id")
+            .and_then(Value::as_str)
+            == Some(source_input_id)
+        && json_i64(event.pointer("/payload/source_input_offset")) == Some(source_input_offset)
+}
+
+fn json_i64(value: Option<&Value>) -> Option<i64> {
+    value.and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+    })
+}
+
+fn parse_brokers(brokers: &str) -> Result<Vec<String>> {
+    let brokers = brokers
+        .split(',')
+        .map(str::trim)
+        .filter(|broker| !broker.is_empty())
+        .map(String::from)
+        .collect::<Vec<_>>();
+
+    if brokers.is_empty() {
+        bail!("redpanda broker list is empty");
+    }
+
+    Ok(brokers)
 }
 
 async fn wait_for_wallet_outbox_drained(pool: &Pool<Postgres>) -> Result<()> {

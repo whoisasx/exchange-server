@@ -542,6 +542,7 @@ driver_status=0
     DATABASE_URL="$DATABASE_URL" \
     E2E_SERVER_URL="$API_URL" \
     E2E_WS_URL="$WS_URL" \
+    E2E_REDPANDA_BROKERS="127.0.0.1:${REDPANDA_PORT}" \
     E2E_MARK_INPUT_ID="$E2E_MARK_INPUT_ID" \
     cargo run -p e2e-smoke
 ) || driver_status=$?

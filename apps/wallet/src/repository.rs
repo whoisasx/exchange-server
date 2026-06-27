@@ -90,6 +90,9 @@ RETURNING
 const MARK_OUTBOX_PUBLISHED_SQL: &str = r#"
 UPDATE wallet_outbox
 SET status='PUBLISHED',
+    published_partition=$2,
+    published_offset=$3,
+    last_error=NULL,
     published_at=NOW(),
     updated_at=NOW()
 WHERE outbox_id=$1
@@ -1289,9 +1292,16 @@ impl WalletRepository {
         Ok(rows.into_iter().map(outbox_message_from_row).collect())
     }
 
-    pub async fn mark_outbox_published(&self, outbox_id: i64) -> Result<(), WalletRepositoryError> {
+    pub async fn mark_outbox_published(
+        &self,
+        outbox_id: i64,
+        published_partition: i32,
+        published_offset: i64,
+    ) -> Result<(), WalletRepositoryError> {
         sqlx::query(MARK_OUTBOX_PUBLISHED_SQL)
             .bind(outbox_id)
+            .bind(published_partition)
+            .bind(published_offset)
             .execute(&self.pool)
             .await?;
 

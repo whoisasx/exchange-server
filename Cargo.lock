@@ -778,6 +778,7 @@ dependencies = [
  "anyhow",
  "futures-util",
  "reqwest",
+ "rskafka",
  "serde",
  "serde_json",
  "sqlx",

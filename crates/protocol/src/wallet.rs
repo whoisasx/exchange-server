@@ -43,8 +43,10 @@ pub struct PlaceOrderIntent {
 
 impl PlaceOrderIntent {
     pub fn into_reserved_order(self, reservation_id: String) -> ReservedPlaceOrder {
+        let input_id = engine_input_id("place-order", &self.envelope);
+
         ReservedPlaceOrder {
-            input_id: None,
+            input_id: Some(input_id),
             envelope: self.envelope,
             order_id: self.order_id,
             reservation_id,
@@ -71,13 +73,22 @@ pub struct CancelOrderIntent {
 
 impl CancelOrderIntent {
     pub fn into_engine_cancel_order(self) -> CancelOrder {
+        let input_id = engine_input_id("cancel-order", &self.envelope);
+
         CancelOrder {
-            input_id: None,
+            input_id: Some(input_id),
             envelope: self.envelope,
             market_id: self.market_id,
             order_id: self.order_id,
         }
     }
+}
+
+fn engine_input_id(kind: &str, envelope: &CommandEnvelope) -> String {
+    format!(
+        "engine-input:{kind}:{}:{}",
+        envelope.user_id, envelope.idempotency_key
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

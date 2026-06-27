@@ -10,12 +10,16 @@ CREATE TABLE wallet_outbox(
   attempts         INTEGER NOT NULL DEFAULT 0,
   next_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_error       TEXT,
+  published_partition INTEGER,
+  published_offset BIGINT,
   published_at     TIMESTAMPTZ,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
 
   UNIQUE(dedupe_key),
   CHECK(partition IS NULL OR partition >= 0),
+  CHECK(published_partition IS NULL OR published_partition >= 0),
+  CHECK(published_offset IS NULL OR published_offset >= 0),
   CHECK(attempts >= 0),
   CHECK(status IN ('PENDING', 'PROCESSING', 'PUBLISHED'))
 );
