@@ -2,8 +2,11 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let migrations_dir = manifest_dir.join("migrations");
+    print_rerun_for_migrations(&manifest_dir.join("migrations"));
+    print_rerun_for_migrations(&manifest_dir.join("timeseries_migrations"));
+}
 
+fn print_rerun_for_migrations(migrations_dir: &PathBuf) {
     println!("cargo:rerun-if-changed={}", migrations_dir.display());
 
     for entry in fs::read_dir(&migrations_dir).expect("read migrations directory") {

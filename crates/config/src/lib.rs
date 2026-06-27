@@ -4,6 +4,7 @@ use std::env;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
+    pub timeseries_database_url: Option<String>,
     pub server_url: String,
     pub server_port: u16,
     pub server_host: String,
@@ -20,6 +21,7 @@ impl Config {
     pub fn init() -> Config {
         dotenv().ok();
         let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let timeseries_database_url = Some(env_required("TIMESERIES_DATABASE_URL"));
         let server_url = env::var("SERVER_URL").expect("SERVER_URL must be set");
         let server_port = env::var("SERVER_PORT")
             .unwrap()
@@ -46,6 +48,7 @@ impl Config {
 
         Config {
             database_url,
+            timeseries_database_url,
             server_url,
             server_port,
             server_host,
@@ -57,5 +60,50 @@ impl Config {
             server_reply_partition,
             request_wait_timeout_ms,
         }
+    }
+}
+
+fn env_required(key: &str) -> String {
+    required_value(key, env::var(key).ok())
+}
+
+fn required_value(key: &str, value: Option<String>) -> String {
+    value
+        .and_then(non_empty)
+        .unwrap_or_else(|| panic!("{key} must be set"))
+}
+
+fn non_empty(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_value_accepts_timeseries_database_url() {
+        let database_url = required_value(
+            "TIMESERIES_DATABASE_URL",
+            Some(String::from("postgres://localhost/timeseries")),
+        );
+
+        assert_eq!(database_url, "postgres://localhost/timeseries");
+    }
+
+    #[test]
+    #[should_panic(expected = "TIMESERIES_DATABASE_URL must be set")]
+    fn required_value_rejects_missing_timeseries_database_url() {
+        required_value("TIMESERIES_DATABASE_URL", None);
+    }
+
+    #[test]
+    #[should_panic(expected = "TIMESERIES_DATABASE_URL must be set")]
+    fn required_value_rejects_blank_timeseries_database_url() {
+        required_value("TIMESERIES_DATABASE_URL", Some(String::from("  ")));
     }
 }

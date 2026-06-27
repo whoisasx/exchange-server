@@ -62,6 +62,7 @@ struct Settings {
     server_url: String,
     ws_url: String,
     database_url: String,
+    timeseries_database_url: String,
     redpanda_brokers: String,
     engine_input_topic: String,
     engine_replies_topic: String,
@@ -151,6 +152,15 @@ async fn main() -> Result<()> {
         .connect(&settings.database_url)
         .await
         .context("failed to connect to smoke database")?;
+    let timeseries_pool = if settings.timeseries_database_url == settings.database_url {
+        pool.clone()
+    } else {
+        PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&settings.timeseries_database_url)
+            .await
+            .context("failed to connect to smoke timeseries database")?
+    };
 
     wait_for_server(&client, &settings.server_url, PRIMARY_MARKET).await?;
     upsert_market(&pool, PRIMARY_MARKET).await?;
@@ -313,7 +323,7 @@ async fn main() -> Result<()> {
     .await?;
 
     wait_for_projected_fill(&pool, PRIMARY_MARKET, alice.userid, bob.userid).await?;
-    wait_for_candles(&pool, PRIMARY_MARKET).await?;
+    wait_for_candles(&timeseries_pool, PRIMARY_MARKET).await?;
     wait_for_candle_api(&client, &settings.server_url, PRIMARY_MARKET).await?;
     wait_for_filled_orders(&pool, PRIMARY_MARKET, alice.userid, bob.userid).await?;
     wait_for_open_position_api(
@@ -379,7 +389,7 @@ async fn main() -> Result<()> {
     .await?;
 
     wait_for_projected_fill(&pool, SECONDARY_MARKET, dave.userid, erin.userid).await?;
-    wait_for_candles(&pool, SECONDARY_MARKET).await?;
+    wait_for_candles(&timeseries_pool, SECONDARY_MARKET).await?;
     wait_for_candle_api(&client, &settings.server_url, SECONDARY_MARKET).await?;
     wait_for_filled_orders(&pool, SECONDARY_MARKET, dave.userid, erin.userid).await?;
     wait_for_open_position_api(
@@ -500,7 +510,7 @@ async fn main() -> Result<()> {
     wait_for_command_traces(&pool, &settings, &command_traces).await?;
     wait_for_wallet_outbox_drained(&pool).await?;
     wait_for_wallet_ledger_logical_event_ids(&pool).await?;
-    wait_for_consumer_offsets(&pool, &settings, &command_traces).await?;
+    wait_for_consumer_offsets(&pool, &timeseries_pool, &settings, &command_traces).await?;
 
     println!("e2e smoke passed");
     Ok(())
@@ -508,14 +518,19 @@ async fn main() -> Result<()> {
 
 impl Settings {
     fn from_env() -> Self {
+        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
+            String::from("postgres://postgres:postgres@127.0.0.1:55432/exchange")
+        });
+        let timeseries_database_url =
+            env::var("TIMESERIES_DATABASE_URL").unwrap_or_else(|_| database_url.clone());
+
         Self {
             server_url: env::var("E2E_SERVER_URL")
                 .unwrap_or_else(|_| String::from("http://127.0.0.1:18080/api")),
             ws_url: env::var("E2E_WS_URL")
                 .unwrap_or_else(|_| String::from("ws://127.0.0.1:18081/ws")),
-            database_url: env::var("DATABASE_URL").unwrap_or_else(|_| {
-                String::from("postgres://postgres:postgres@127.0.0.1:55432/exchange")
-            }),
+            database_url,
+            timeseries_database_url,
             redpanda_brokers: env::var("E2E_REDPANDA_BROKERS")
                 .or_else(|_| env::var("REDPANDA_BROKERS"))
                 .unwrap_or_else(|_| String::from("127.0.0.1:19092")),
@@ -1919,6 +1934,7 @@ struct EngineEventTrace {
 
 async fn wait_for_consumer_offsets(
     pool: &Pool<Postgres>,
+    timeseries_pool: &Pool<Postgres>,
     settings: &Settings,
     traces: &[CommandTrace],
 ) -> Result<()> {
@@ -1972,7 +1988,7 @@ async fn wait_for_consumer_offsets(
     wait_for_projector_offsets_from_wallet_outbox(pool, &settings.wallet_events_topic).await?;
     wait_for_ledger_offsets_from_events(pool, &settings.wallet_events_topic).await?;
     wait_for_expected_offsets(
-        pool,
+        timeseries_pool,
         "timeseries_offsets",
         &settings.engine_events_topic,
         &engine_event_offsets,

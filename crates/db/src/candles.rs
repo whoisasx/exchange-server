@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::{dto::CandleRow, pool::pool};
+use crate::{dto::CandleRow, pool::timeseries_pool};
 
 pub const CANDLE_INTERVALS: [&str; 5] = ["1m", "5m", "15m", "1h", "1d"];
 pub const DEFAULT_CANDLE_LIMIT: i64 = 500;
@@ -51,7 +51,7 @@ pub async fn get_market_candles(
     .bind(start)
     .bind(end)
     .bind(limit)
-    .fetch_all(pool())
+    .fetch_all(timeseries_pool())
     .await?;
 
     Ok(candles)

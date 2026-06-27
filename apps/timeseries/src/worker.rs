@@ -139,13 +139,18 @@ fn timeseries_repository_error(error: TimeseriesRepositoryError) -> TimeseriesEr
 
 #[cfg(test)]
 mod tests {
+    use protocol::engine;
     use sqlx::postgres::PgPoolOptions;
 
     use super::*;
 
     #[tokio::test]
     async fn worker_keeps_settings() {
-        let settings = TimeseriesSettings::from_env();
+        let settings = TimeseriesSettings {
+            database_url: String::from("postgres://localhost/timeseries"),
+            redpanda_brokers: String::from("localhost:9092"),
+            engine_events_topic: String::from(engine::ENGINE_EVENTS_TOPIC),
+        };
         let pool = PgPoolOptions::new()
             .connect_lazy(&settings.database_url)
             .expect("test database URL should be valid");

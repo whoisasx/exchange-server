@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use db::pool::{init_pool, run_migration};
+use db::pool::run_timeseries_migration;
 use sqlx::postgres::PgPoolOptions;
 use timeseries::{
     processor::TimeseriesProcessor, repository::TimeseriesRepository, settings::TimeseriesSettings,
@@ -16,8 +16,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .max_connections(20)
         .connect(&settings.database_url)
         .await?;
-    init_pool(pool.clone());
-    run_migration().await?;
+    run_timeseries_migration(&pool).await?;
 
     let repository = TimeseriesRepository::new(pool);
     let processor = TimeseriesProcessor::new();

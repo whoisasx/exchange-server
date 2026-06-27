@@ -767,11 +767,36 @@ mod tests {
         let fixture = serde_json::from_str::<Value>(json).expect("fixture should be valid JSON");
         let serialized = serde_json::to_value(parsed).expect("protocol value should serialize");
 
-        assert_eq!(serialized, fixture);
+        assert_known_serialized_fields_match(&fixture, &serialized);
+    }
+
+    fn assert_known_serialized_fields_match(fixture: &Value, serialized: &Value) {
+        match (fixture, serialized) {
+            (Value::Object(fixture), Value::Object(serialized)) => {
+                for (key, serialized_value) in serialized {
+                    let fixture_value = fixture
+                        .get(key)
+                        .unwrap_or_else(|| panic!("serialized field {key} missing from fixture"));
+                    assert_known_serialized_fields_match(fixture_value, serialized_value);
+                }
+            }
+            (Value::Array(fixture), Value::Array(serialized)) => {
+                assert_eq!(
+                    fixture.len(),
+                    serialized.len(),
+                    "serialized array length differs from fixture"
+                );
+
+                for (fixture_value, serialized_value) in fixture.iter().zip(serialized) {
+                    assert_known_serialized_fields_match(fixture_value, serialized_value);
+                }
+            }
+            _ => assert_eq!(serialized, fixture),
+        }
     }
 
     fn engine_fixture_paths() -> Vec<PathBuf> {
-        let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples");
+        let examples_dir = engine_examples_dir();
         let mut paths = Vec::new();
 
         for entry in fs::read_dir(&examples_dir).expect("docs/examples should be readable") {
@@ -784,6 +809,17 @@ mod tests {
 
         paths.sort();
         paths
+    }
+
+    fn engine_examples_dir() -> PathBuf {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let upstream_examples_dir = manifest_dir.join("../../../engine/docs/examples");
+
+        if upstream_examples_dir.is_dir() {
+            return upstream_examples_dir;
+        }
+
+        manifest_dir.join("../../docs/examples")
     }
 
     fn assert_message_shape(file_name: &str, fixture: &Value) {

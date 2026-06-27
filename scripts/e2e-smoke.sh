@@ -8,14 +8,42 @@ COMPOSE_FILE="$ROOT_DIR/scripts/e2e-compose.yml"
 PROJECT_NAME="${E2E_COMPOSE_PROJECT:-exchange-e2e}"
 POSTGRES_PORT="${E2E_POSTGRES_PORT:-55432}"
 REDPANDA_PORT="${E2E_REDPANDA_PORT:-19092}"
+TIMESCALE_PORT="${E2E_TIMESCALE_PORT:-55433}"
+MINIO_PORT="${E2E_MINIO_PORT:-59000}"
+MINIO_CONSOLE_PORT="${E2E_MINIO_CONSOLE_PORT:-59001}"
 SERVER_PORT="${E2E_SERVER_PORT:-18080}"
 WS_PORT="${E2E_WS_PORT:-18081}"
 DATABASE_URL="postgres://postgres:postgres@127.0.0.1:${POSTGRES_PORT}/exchange"
+TIMESCALE_DB="${TIMESCALE_DB:-exchange_timeseries}"
+TIMESCALE_USER="${TIMESCALE_USER:-postgres}"
+TIMESCALE_PASSWORD="${TIMESCALE_PASSWORD:-postgres}"
+TIMESCALE_IMAGE="${TIMESCALE_IMAGE:-timescale/timescaledb:latest-pg16}"
+TIMESCALE_CONTAINER="${E2E_TIMESCALE_CONTAINER:-perpex-timescaledb}"
+TIMESCALE_VOLUME="${E2E_TIMESCALE_VOLUME:-perpex-timescaledb-data}"
+MINIO_IMAGE="${MINIO_IMAGE:-minio/minio:latest}"
+MINIO_MC_IMAGE="${MINIO_MC_IMAGE:-minio/mc:latest}"
+MINIO_CONTAINER="${E2E_MINIO_CONTAINER:-perpex-minio}"
+MINIO_VOLUME="${E2E_MINIO_VOLUME:-perpex-minio-data}"
 SERVER_URL="http://127.0.0.1:${SERVER_PORT}"
 API_URL="${SERVER_URL}/api"
 WS_URL="ws://127.0.0.1:${WS_PORT}/ws"
 E2E_MARK_INPUT_ID="${E2E_MARK_INPUT_ID:-${PROJECT_NAME}-mark-price-smoke}"
 LOG_DIR="$ROOT_DIR/target/e2e-smoke"
+TIMESERIES_DATABASE_URL="${TIMESERIES_DATABASE_URL:-postgres://${TIMESCALE_USER}:${TIMESCALE_PASSWORD}@127.0.0.1:${TIMESCALE_PORT}/${TIMESCALE_DB}}"
+S3_ENDPOINT="${S3_ENDPOINT:-http://127.0.0.1:${MINIO_PORT}}"
+S3_REGION="${S3_REGION:-us-east-1}"
+S3_BUCKET="${S3_BUCKET:-${MINIO_BUCKET:-exchange-checkpoints}}"
+S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-${MINIO_ROOT_USER:-minioadmin}}"
+S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-minioadmin}}"
+S3_FORCE_PATH_STYLE="${S3_FORCE_PATH_STYLE:-true}"
+MINIO_ROOT_USER="$S3_ACCESS_KEY_ID"
+MINIO_ROOT_PASSWORD="$S3_SECRET_ACCESS_KEY"
+MINIO_BUCKET="$S3_BUCKET"
+export E2E_TIMESCALE_PORT="$TIMESCALE_PORT"
+export E2E_MINIO_PORT="$MINIO_PORT"
+export E2E_MINIO_CONSOLE_PORT="$MINIO_CONSOLE_PORT"
+export TIMESCALE_DB TIMESCALE_USER TIMESCALE_PASSWORD
+export MINIO_ROOT_USER MINIO_ROOT_PASSWORD MINIO_BUCKET
 CPP_ENGINE_BUILD_DIR="${E2E_CPP_ENGINE_BUILD_DIR:-$LOG_DIR/cpp-engine-build}"
 CPP_ENGINE_BROKERS="${E2E_CPP_ENGINE_BROKERS:-${CEX_ENGINE_BOOTSTRAP_SERVERS:-127.0.0.1:${REDPANDA_PORT}}}"
 CPP_ENGINE_GROUP_ID="${E2E_CPP_ENGINE_GROUP_ID:-${CEX_ENGINE_GROUP_ID:-${PROJECT_NAME}-cpp-engine}}"
@@ -42,6 +70,189 @@ PIDS=()
 SERVICE_NAMES=()
 SERVICE_PIDS=()
 
+compose() {
+  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+}
+
+container_exists() {
+  docker container inspect "$1" >/dev/null 2>&1
+}
+
+container_running() {
+  [[ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" == "true" ]]
+}
+
+container_image_matches() {
+  local container="$1"
+  local expected_image="$2"
+  local config_image
+  local container_image_id
+  local expected_image_id
+
+  config_image="$(docker container inspect -f '{{.Config.Image}}' "$container")"
+  if [[ "$config_image" == "$expected_image" ]]; then
+    return 0
+  fi
+
+  container_image_id="$(docker container inspect -f '{{.Image}}' "$container")"
+  expected_image_id="$(docker image inspect -f '{{.Id}}' "$expected_image" 2>/dev/null || true)"
+  [[ -n "$expected_image_id" && "$container_image_id" == "$expected_image_id" ]]
+}
+
+require_container_image() {
+  local container="$1"
+  local expected_image="$2"
+  local actual_image
+
+  if container_image_matches "$container" "$expected_image"; then
+    return
+  fi
+
+  actual_image="$(docker container inspect -f '{{.Config.Image}}' "$container")"
+  echo "$container exists but uses image $actual_image; expected $expected_image" >&2
+  echo "remove the container or set the matching image env before rerunning" >&2
+  exit 1
+}
+
+require_container_port() {
+  local container="$1"
+  local container_port="$2"
+  local host_port="$3"
+  local published
+
+  published="$(docker port "$container" "${container_port}/tcp" 2>/dev/null || true)"
+  if printf '%s\n' "$published" | awk -F: '{ print $NF }' | grep -Fxq "$host_port"; then
+    return
+  fi
+
+  echo "$container exists but does not publish ${container_port}/tcp on host port $host_port" >&2
+  echo "current port mapping: ${published:-none}" >&2
+  exit 1
+}
+
+require_container_env() {
+  local container="$1"
+  local key="$2"
+  local expected="$3"
+
+  if docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" |
+    grep -Fxq "${key}=${expected}"; then
+    return
+  fi
+
+  echo "$container exists but does not have the expected $key value" >&2
+  echo "remove the container or set the matching env before rerunning" >&2
+  exit 1
+}
+
+remove_direct_storage_infra() {
+  docker rm -f "$TIMESCALE_CONTAINER" "$MINIO_CONTAINER" >/dev/null 2>&1 || true
+  docker volume rm "$TIMESCALE_VOLUME" "$MINIO_VOLUME" >/dev/null 2>&1 || true
+}
+
+create_timescale_container() {
+  docker run -d \
+    --name "$TIMESCALE_CONTAINER" \
+    --label perpex.e2e.role=timescaledb \
+    --label "perpex.e2e.project=$PROJECT_NAME" \
+    -e "POSTGRES_DB=$TIMESCALE_DB" \
+    -e "POSTGRES_USER=$TIMESCALE_USER" \
+    -e "POSTGRES_PASSWORD=$TIMESCALE_PASSWORD" \
+    -p "${TIMESCALE_PORT}:5432" \
+    -v "${TIMESCALE_VOLUME}:/var/lib/postgresql/data" \
+    "$TIMESCALE_IMAGE" >/dev/null
+}
+
+validate_timescale_container() {
+  require_container_image "$TIMESCALE_CONTAINER" "$TIMESCALE_IMAGE"
+  require_container_port "$TIMESCALE_CONTAINER" 5432 "$TIMESCALE_PORT"
+  require_container_env "$TIMESCALE_CONTAINER" POSTGRES_DB "$TIMESCALE_DB"
+  require_container_env "$TIMESCALE_CONTAINER" POSTGRES_USER "$TIMESCALE_USER"
+  require_container_env "$TIMESCALE_CONTAINER" POSTGRES_PASSWORD "$TIMESCALE_PASSWORD"
+}
+
+ensure_timescale_container() {
+  if container_exists "$TIMESCALE_CONTAINER"; then
+    validate_timescale_container
+    if ! container_running "$TIMESCALE_CONTAINER"; then
+      docker start "$TIMESCALE_CONTAINER" >/dev/null
+    fi
+    return
+  fi
+
+  create_timescale_container
+}
+
+create_minio_container() {
+  docker run -d \
+    --name "$MINIO_CONTAINER" \
+    --label perpex.e2e.role=minio \
+    --label "perpex.e2e.project=$PROJECT_NAME" \
+    -e "MINIO_ROOT_USER=$MINIO_ROOT_USER" \
+    -e "MINIO_ROOT_PASSWORD=$MINIO_ROOT_PASSWORD" \
+    -p "${MINIO_PORT}:9000" \
+    -p "${MINIO_CONSOLE_PORT}:9001" \
+    -v "${MINIO_VOLUME}:/data" \
+    "$MINIO_IMAGE" server /data --console-address ":9001" >/dev/null
+}
+
+validate_minio_container() {
+  require_container_image "$MINIO_CONTAINER" "$MINIO_IMAGE"
+  require_container_port "$MINIO_CONTAINER" 9000 "$MINIO_PORT"
+  require_container_port "$MINIO_CONTAINER" 9001 "$MINIO_CONSOLE_PORT"
+  require_container_env "$MINIO_CONTAINER" MINIO_ROOT_USER "$MINIO_ROOT_USER"
+  require_container_env "$MINIO_CONTAINER" MINIO_ROOT_PASSWORD "$MINIO_ROOT_PASSWORD"
+}
+
+ensure_minio_container() {
+  if container_exists "$MINIO_CONTAINER"; then
+    validate_minio_container
+    if ! container_running "$MINIO_CONTAINER"; then
+      docker start "$MINIO_CONTAINER" >/dev/null
+    fi
+    return
+  fi
+
+  create_minio_container
+}
+
+start_direct_storage_infra() {
+  echo "starting direct storage containers: $TIMESCALE_CONTAINER, $MINIO_CONTAINER"
+  if [[ "${E2E_KEEP_INFRA:-0}" != "1" ]]; then
+    remove_direct_storage_infra
+  fi
+
+  ensure_timescale_container
+  ensure_minio_container
+}
+
+print_direct_storage_context() {
+  local lines="${1:-120}"
+  local container
+
+  echo >&2
+  echo "direct storage containers:" >&2
+  for container in "$TIMESCALE_CONTAINER" "$MINIO_CONTAINER"; do
+    if container_exists "$container"; then
+      docker container inspect \
+        -f '{{.Name}} image={{.Config.Image}} state={{.State.Status}}' \
+        "$container" >&2 || true
+      docker port "$container" >&2 || true
+    else
+      echo "$container not found" >&2
+    fi
+  done
+
+  echo >&2
+  echo "direct storage log tails (last ${lines} lines):" >&2
+  for container in "$TIMESCALE_CONTAINER" "$MINIO_CONTAINER"; do
+    if container_exists "$container"; then
+      echo "----- $container -----" >&2
+      docker logs --tail "$lines" "$container" >&2 || true
+    fi
+  done
+}
+
 print_failure_context() {
   local lines="${E2E_LOG_TAIL_LINES:-120}"
   local log_file
@@ -53,7 +264,8 @@ print_failure_context() {
   if command -v docker >/dev/null 2>&1; then
     echo >&2
     echo "docker compose services:" >&2
-    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" ps >&2 || true
+    compose ps >&2 || true
+    print_direct_storage_context "$lines"
   fi
 
   echo >&2
@@ -72,7 +284,7 @@ print_failure_context() {
   if command -v docker >/dev/null 2>&1; then
     echo >&2
     echo "infra log tails (last ${lines} lines):" >&2
-    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" logs --no-color --tail "$lines" >&2 || true
+    compose logs --no-color --tail "$lines" >&2 || true
   fi
 }
 
@@ -83,7 +295,8 @@ cleanup() {
   fi
 
   if [[ "${E2E_KEEP_INFRA:-0}" != "1" ]]; then
-    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
+    compose down -v --remove-orphans >/dev/null 2>&1 || true
+    remove_direct_storage_infra
   fi
 }
 
@@ -121,257 +334,14 @@ wait_until() {
   done
 
   echo "timed out waiting for $label" >&2
-  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" ps >&2 || true
+  compose ps >&2 || true
+  print_direct_storage_context 80
   exit 1
 }
 
-create_topic() {
-  local topic="$1"
-  local partitions="$2"
-  local attempt
-  shift 2
-
-  for attempt in $(seq 1 10); do
-    if docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda \
-      rpk topic create --if-not-exists --partitions "$partitions" --brokers localhost:9092 "$@" "$topic" >/dev/null; then
-      return 0
-    fi
-    sleep 1
-  done
-
-  echo "failed to create topic $topic after retries" >&2
-  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda \
-    rpk topic create --if-not-exists --partitions "$partitions" --brokers localhost:9092 "$@" "$topic"
-}
-
-set_topic_config() {
-  local topic="$1"
-  local config="$2"
-  local attempt
-
-  for attempt in $(seq 1 10); do
-    if docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda \
-      rpk topic alter-config "$topic" --set "$config" --brokers localhost:9092 >/dev/null; then
-      return 0
-    fi
-    sleep 1
-  done
-
-  echo "failed to set topic config $topic $config after retries" >&2
-  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda \
-    rpk topic alter-config "$topic" --set "$config" --brokers localhost:9092
-}
-
-topic_partitions() {
-  local topic="$1"
-
-  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda \
-    rpk topic describe "$topic" --brokers localhost:9092 | awk '$1 == "PARTITIONS" { print $2; exit }'
-}
-
-assert_topic_partitions() {
-  local topic="$1"
-  local expected="$2"
-  local actual
-  local attempt
-
-  for attempt in $(seq 1 10); do
-    actual="$(topic_partitions "$topic" || true)"
-    if [[ "$actual" == "$expected" ]]; then
-      return 0
-    fi
-    sleep 1
-  done
-
-  echo "topic $topic must have $expected partition(s), found ${actual:-unknown}" >&2
-  exit 1
-}
-
-create_engine_input_topic() {
-  create_topic engine.input 1 -c retention.ms=1800000
-  set_topic_config engine.input retention.ms=1800000
-  assert_topic_partitions engine.input 1
-}
-
-register_service_pid() {
-  local name="$1"
-  local pid="$2"
-  local log_file="$3"
-
-  PIDS+=("$pid")
-  SERVICE_NAMES+=("$name")
-  SERVICE_PIDS+=("$pid")
-  echo "started $name (pid $pid), log: $log_file"
-}
-
-start_service() {
-  local binary="$1"
-  local log_file="$LOG_DIR/${binary}.log"
-  local pid
-
-  (
-    cd "$ROOT_DIR"
-    env \
-      DATABASE_URL="$DATABASE_URL" \
-      SERVER_URL="$SERVER_URL" \
-      SERVER_HOST="127.0.0.1" \
-      SERVER_PORT="$SERVER_PORT" \
-      WS_HOST="127.0.0.1" \
-      WS_PORT="$WS_PORT" \
-      JWT_SECRET="e2e-secret" \
-      REDPANDA_BROKERS="127.0.0.1:${REDPANDA_PORT}" \
-      SERVER_REPLY_PARTITION="0" \
-      REQUEST_WAIT_TIMEOUT_MS="${E2E_REQUEST_WAIT_TIMEOUT_MS:-8000}" \
-      "$ROOT_DIR/target/debug/$binary"
-  ) >"$log_file" 2>&1 &
-
-  pid="$!"
-  register_service_pid "$binary" "$pid" "$log_file"
-}
-
-find_cpp_engine_app() {
-  local candidate
-
-  for candidate in \
-    "$CPP_ENGINE_BUILD_DIR/engine_app" \
-    "$CPP_ENGINE_BUILD_DIR/Debug/engine_app" \
-    "$CPP_ENGINE_BUILD_DIR/Release/engine_app" \
-    "$CPP_ENGINE_BUILD_DIR/RelWithDebInfo/engine_app" \
-    "$CPP_ENGINE_BUILD_DIR/MinSizeRel/engine_app"; do
-    if [[ -x "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-
-  if [[ -d "$CPP_ENGINE_BUILD_DIR" ]]; then
-    find "$CPP_ENGINE_BUILD_DIR" -maxdepth 3 -type f -name engine_app -perm -111 -print \
-      2>/dev/null | head -n 1
-  fi
-}
-
-prepare_cpp_engine_markets_config() {
-  if [[ "$CPP_ENGINE_MARKETS_CONFIG_MANAGED" != "1" ]]; then
-    if [[ ! -f "$CPP_ENGINE_MARKETS_CONFIG" ]]; then
-      echo "C++ engine markets config not found: $CPP_ENGINE_MARKETS_CONFIG" >&2
-      exit 1
-    fi
-    return
-  fi
-
-  mkdir -p "$(dirname "$CPP_ENGINE_MARKETS_CONFIG")"
-  cat >"$CPP_ENGINE_MARKETS_CONFIG" <<'EOF_MARKETS'
-[[market]]
-market_id = 1
-market_name = SOL-PERP
-tick_size = 1
-lot_size = 1
-min_quantity = 1
-max_quantity = 1000000
-min_price = 1
-max_price = 1000000
-ring_capacity_ticks = 1000
-threshold_percentage = 10
-initial_base_tick = 0
-price_scale = 0
-quantity_scale = 0
-maker_fee_rate = 0
-taker_fee_rate = 0
-trading_enabled = true
-
-[[market]]
-market_id = 2
-market_name = ETH-PERP
-tick_size = 1
-lot_size = 1
-min_quantity = 1
-max_quantity = 1000000
-min_price = 1
-max_price = 1000000
-ring_capacity_ticks = 1000
-threshold_percentage = 10
-initial_base_tick = 0
-price_scale = 0
-quantity_scale = 0
-maker_fee_rate = 0
-taker_fee_rate = 0
-trading_enabled = true
-EOF_MARKETS
-}
-
-build_cpp_engine_app() {
-  if [[ ! -d "$ENGINE_DIR" ]]; then
-    echo "e2e smoke requires the C++ engine checkout at $ENGINE_DIR" >&2
-    exit 1
-  fi
-
-  local build_type="${E2E_CPP_ENGINE_BUILD_TYPE:-${CMAKE_BUILD_TYPE:-Debug}}"
-  local cxx_standard="${E2E_CPP_ENGINE_CXX_STANDARD:-${CMAKE_CXX_STANDARD:-20}}"
-  local build_args=(--build "$CPP_ENGINE_BUILD_DIR" --target engine_app --parallel)
-  if [[ -n "${E2E_CPP_ENGINE_BUILD_JOBS:-}" ]]; then
-    build_args+=("$E2E_CPP_ENGINE_BUILD_JOBS")
-  fi
-
-  if ! cmake -S "$ENGINE_DIR" -B "$CPP_ENGINE_BUILD_DIR" \
-    -DCMAKE_BUILD_TYPE="$build_type" \
-    -DCMAKE_CXX_STANDARD="$cxx_standard" \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; then
-    echo "failed to configure C++ engine build at $CPP_ENGINE_BUILD_DIR" >&2
-    exit 1
-  fi
-  if ! cmake "${build_args[@]}"; then
-    echo "failed to build C++ engine_app from $ENGINE_DIR; install librdkafka++" >&2
-    exit 1
-  fi
-
-  if [[ -z "$(find_cpp_engine_app)" ]]; then
-    echo "C++ engine_app was not built at $CPP_ENGINE_BUILD_DIR; install librdkafka++" >&2
-    exit 1
-  fi
-}
-
-seed_cpp_engine_group_to_end() {
-  echo "seeding C++ engine group $CPP_ENGINE_GROUP_ID at engine.input end"
-  if ! docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda \
-    rpk group seek "$CPP_ENGINE_GROUP_ID" --to end --topics engine.input \
-      --allow-new-topics --brokers localhost:9092 >/dev/null; then
-    echo "failed to seed C++ engine group $CPP_ENGINE_GROUP_ID to the current engine.input end" >&2
-    exit 1
-  fi
-}
-
-start_cpp_engine() {
-  local engine_app
-  local log_file="$LOG_DIR/cpp-engine.log"
-  local pid
-
-  engine_app="$(find_cpp_engine_app)"
-  if [[ -z "$engine_app" ]]; then
-    echo "C++ engine_app not found under $CPP_ENGINE_BUILD_DIR; build step did not produce it" >&2
-    exit 1
-  fi
-
-  prepare_cpp_engine_markets_config
-  mkdir -p "$CPP_ENGINE_CHECKPOINT_DIR"
-  seed_cpp_engine_group_to_end
-
-  (
-    cd "$ENGINE_DIR"
-    export CEX_ENGINE_BOOTSTRAP_SERVERS="$CPP_ENGINE_BROKERS"
-    export CEX_ENGINE_GROUP_ID="$CPP_ENGINE_GROUP_ID"
-    export CEX_ENGINE_CHECKPOINT_DIR="$CPP_ENGINE_CHECKPOINT_DIR"
-    export CEX_ENGINE_MARKETS_CONFIG="$CPP_ENGINE_MARKETS_CONFIG"
-    if [[ -n "$CPP_ENGINE_POLL_LIMIT" ]]; then
-      export CEX_ENGINE_POLL_LIMIT="$CPP_ENGINE_POLL_LIMIT"
-    else
-      unset CEX_ENGINE_POLL_LIMIT
-    fi
-    "$engine_app"
-  ) >"$log_file" 2>&1 &
-
-  pid="$!"
-  register_service_pid "cpp-engine" "$pid" "$log_file"
-}
+source "$ROOT_DIR/scripts/e2e/redpanda.sh"
+source "$ROOT_DIR/scripts/e2e/exchange-services.sh"
+source "$ROOT_DIR/scripts/e2e/cpp-engine.sh"
 
 publish_mark_ingress_input() {
   local now_ms
@@ -400,14 +370,112 @@ publish_mark_ingress_input() {
 }
 
 wait_for_migrations() {
-  wait_until database-migrations bash -c \
-    "docker compose -p '$PROJECT_NAME' -f '$COMPOSE_FILE' exec -T postgres psql -U postgres -d exchange -tAc \"SELECT to_regclass('public.markets') IS NOT NULL\" | grep -q t"
+  wait_until database-migrations main_database_migrations_ready
 }
 
-seed_smoke_markets() {
-  echo "seeding smoke markets before ingress inputs"
-  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T postgres \
-    psql -U postgres -d exchange <<'EOF_SQL' >/dev/null
+main_database_migrations_ready() {
+  compose exec -T postgres psql -U postgres -d exchange -tAc \
+    "SELECT to_regclass('public.markets') IS NOT NULL" | grep -q t
+}
+
+timescale_psql() {
+  docker exec -i "$TIMESCALE_CONTAINER" psql -U "$TIMESCALE_USER" -d "$TIMESCALE_DB" "$@"
+}
+
+timescale_extension_ready() {
+  timescale_psql -tAc \
+    "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='timescaledb')" | grep -q t
+}
+
+timescale_sql_ready() {
+  timescale_psql -tAc "SELECT 1" | grep -q 1
+}
+
+apply_timescale_init() {
+  timescale_psql -v ON_ERROR_STOP=1 -f - <"$ROOT_DIR/scripts/timescale-init/001_timescaledb.sql"
+}
+
+timeseries_database_migrations_ready() {
+  timescale_psql -tAc \
+    "SELECT to_regclass('public.candles') IS NOT NULL AND to_regclass('public.timeseries_offsets') IS NOT NULL" | grep -q t
+}
+
+timeseries_markets_table_ready() {
+  timescale_psql -tAc \
+    "SELECT to_regclass('public.markets') IS NOT NULL" | grep -q t
+}
+
+wait_for_storage_infra() {
+  echo "waiting for storage infra"
+  wait_until timescaledb docker exec "$TIMESCALE_CONTAINER" pg_isready -U "$TIMESCALE_USER" -d "$TIMESCALE_DB"
+  wait_until timescaledb-sql timescale_sql_ready
+  wait_until minio curl -fsS "$S3_ENDPOINT/minio/health/ready"
+
+  echo "applying Timescale init"
+  wait_until timescale-init apply_timescale_init
+  wait_until timescale-init timescale_extension_ready
+  wait_until minio-bucket-create create_minio_bucket
+  wait_until minio-bucket minio_bucket_exists
+  clear_minio_checkpoint_objects
+}
+
+wait_for_timeseries_migrations() {
+  wait_until timeseries-database-migrations timeseries_database_migrations_ready
+}
+
+minio_mc() {
+  docker run --rm \
+    --network "container:$MINIO_CONTAINER" \
+    -e "MINIO_ROOT_USER=$MINIO_ROOT_USER" \
+    -e "MINIO_ROOT_PASSWORD=$MINIO_ROOT_PASSWORD" \
+    --entrypoint /bin/sh \
+    "$MINIO_MC_IMAGE" \
+    -c 'mc alias set local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && exec "$@"' \
+    sh "$@"
+}
+
+create_minio_bucket() {
+  minio_mc mc mb --ignore-existing "local/$MINIO_BUCKET"
+}
+
+minio_bucket_exists() {
+  minio_mc mc ls "local/$MINIO_BUCKET"
+}
+
+clear_minio_checkpoint_objects() {
+  echo "clearing MinIO checkpoint bucket"
+  minio_mc mc rm --recursive --force "local/$MINIO_BUCKET" >/dev/null
+}
+
+list_minio_checkpoint_objects() {
+  minio_mc mc find "local/$MINIO_BUCKET" --name "*.checkpoint"
+}
+
+list_minio_objects() {
+  minio_mc mc ls --recursive "local/$MINIO_BUCKET"
+}
+
+assert_minio_checkpoint_objects() {
+  local objects
+  local attempt
+
+  echo "checking MinIO checkpoint objects"
+  for attempt in $(seq 1 60); do
+    objects="$(list_minio_checkpoint_objects || true)"
+    if [[ -n "$objects" ]]; then
+      printf 'MinIO checkpoint objects:\n%s\n' "$objects"
+      return
+    fi
+    sleep 1
+  done
+
+  echo "expected MinIO checkpoint objects in bucket $S3_BUCKET, found none" >&2
+  list_minio_objects >&2 || true
+  return 1
+}
+
+seed_smoke_markets_sql() {
+  cat <<'EOF_SQL'
 INSERT INTO markets(
     market_id,
     market_name,
@@ -430,61 +498,40 @@ SET market_name=EXCLUDED.market_name,
 EOF_SQL
 }
 
-check_services_alive() {
-  local label="$1"
-  local failed=0
-  local i
-  local name
-  local pid
-  local status
+seed_smoke_markets_in_db() {
+  local service="$1"
+  local user="$2"
+  local database="$3"
 
-  for i in "${!SERVICE_PIDS[@]}"; do
-    name="${SERVICE_NAMES[$i]}"
-    pid="${SERVICE_PIDS[$i]}"
+  if [[ "$service" == "timescaledb" ]]; then
+    seed_smoke_markets_sql | docker exec -i "$TIMESCALE_CONTAINER" \
+      psql -U "$user" -d "$database" >/dev/null
+    return
+  fi
 
-    if ! kill -0 "$pid" >/dev/null 2>&1; then
-      status=0
-      wait "$pid" || status=$?
-      echo "service $name exited during $label (pid $pid, status $status)" >&2
-      failed=1
-    fi
-  done
-
-  return "$failed"
+  seed_smoke_markets_sql | compose exec -T "$service" \
+    psql -U "$user" -d "$database" >/dev/null
 }
 
-scan_service_logs() {
-  local pattern="${E2E_LOG_ERROR_PATTERN:-panic|OffsetOutOfRange|task failed|redpanda client failed|Error:}"
-  local allowlist="${E2E_LOG_ERROR_ALLOWLIST:-}"
-  local allowlist_file="${E2E_LOG_ERROR_ALLOWLIST_FILE:-}"
-  local log_file
-  local matches
-  local failed=0
+seed_smoke_markets() {
+  echo "seeding smoke markets before ingress inputs"
+  seed_smoke_markets_in_db postgres postgres exchange
+}
 
-  for log_file in "$LOG_DIR"/*.log; do
-    [[ -e "$log_file" ]] || continue
+seed_timeseries_smoke_markets() {
+  if ! timeseries_markets_table_ready; then
+    echo "timeseries database has no markets table; skipping market seed"
+    return
+  fi
 
-    matches="$(grep -En "$pattern" "$log_file" || true)"
-    if [[ -n "$matches" && -n "$allowlist" ]]; then
-      matches="$(printf '%s\n' "$matches" | grep -Ev "$allowlist" || true)"
-    fi
-    if [[ -n "$matches" && -n "$allowlist_file" && -f "$allowlist_file" ]]; then
-      matches="$(printf '%s\n' "$matches" | grep -Evf "$allowlist_file" || true)"
-    fi
-
-    if [[ -n "$matches" ]]; then
-      echo "serious error pattern found in $(basename "$log_file"):" >&2
-      printf '%s\n' "$matches" >&2
-      failed=1
-    fi
-  done
-
-  return "$failed"
+  echo "seeding timeseries smoke markets"
+  seed_smoke_markets_in_db timescaledb "$TIMESCALE_USER" "$TIMESCALE_DB"
 }
 
 need_command docker
 need_command cargo
 need_command cmake
+need_command curl
 
 mkdir -p "$LOG_DIR"
 rm -f "$LOG_DIR"/*.log
@@ -496,9 +543,12 @@ if [[ "$CPP_ENGINE_MARKETS_CONFIG_MANAGED" == "1" ]]; then
 fi
 
 echo "starting e2e infra"
-docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" up -d
-wait_until postgres docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d exchange
-wait_until redpanda docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T redpanda rpk cluster info --brokers localhost:9092
+echo "storage infra: TimescaleDB $TIMESERIES_DATABASE_URL, MinIO $S3_ENDPOINT bucket $S3_BUCKET"
+compose up -d --remove-orphans
+start_direct_storage_infra
+wait_until postgres compose exec -T postgres pg_isready -U postgres -d exchange
+wait_until redpanda compose exec -T redpanda rpk cluster info --brokers localhost:9092
+wait_for_storage_infra
 
 echo "creating redpanda topics"
 for topic in wallet.commands wallet.replies wallet.events engine.input engine.replies engine.events; do
@@ -531,7 +581,9 @@ if ! check_services_alive "startup"; then
   exit 1
 fi
 wait_for_migrations
+wait_for_timeseries_migrations
 seed_smoke_markets
+seed_timeseries_smoke_markets
 publish_mark_ingress_input
 
 echo "running e2e smoke driver"
@@ -540,6 +592,7 @@ driver_status=0
   cd "$ROOT_DIR"
   env \
     DATABASE_URL="$DATABASE_URL" \
+    TIMESERIES_DATABASE_URL="$TIMESERIES_DATABASE_URL" \
     E2E_SERVER_URL="$API_URL" \
     E2E_WS_URL="$WS_URL" \
     E2E_REDPANDA_BROKERS="127.0.0.1:${REDPANDA_PORT}" \
@@ -549,6 +602,11 @@ driver_status=0
 
 service_status=0
 check_services_alive "the smoke driver" || service_status=$?
+
+storage_status=0
+if ((driver_status == 0)); then
+  assert_minio_checkpoint_objects || storage_status=$?
+fi
 
 log_status=0
 scan_service_logs || log_status=$?
@@ -560,6 +618,11 @@ fi
 
 if ((service_status != 0)); then
   echo "one or more exchange services exited during the smoke run" >&2
+  exit 1
+fi
+
+if ((storage_status != 0)); then
+  echo "storage verification failed" >&2
   exit 1
 fi
 

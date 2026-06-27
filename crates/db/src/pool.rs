@@ -7,6 +7,7 @@ use sqlx::{
 };
 
 static DB_POOL: OnceLock<Pool<Postgres>> = OnceLock::new();
+static TIMESERIES_DB_POOL: OnceLock<Pool<Postgres>> = OnceLock::new();
 
 pub async fn create_db_pool(database_url: &str) -> Result<Pool<Postgres>, sqlx::Error> {
     PgPoolOptions::new()
@@ -22,6 +23,13 @@ pub fn init_pool(pool: Pool<Postgres>) {
     }
 }
 
+pub fn init_timeseries_pool(pool: Pool<Postgres>) {
+    match TIMESERIES_DB_POOL.set(pool) {
+        Ok(()) => {}
+        Err(_) => panic!("timeseries_db_pool already exists"),
+    }
+}
+
 pub fn pool() -> &'static Pool<Postgres> {
     match DB_POOL.get() {
         Some(pool) => pool,
@@ -29,6 +37,17 @@ pub fn pool() -> &'static Pool<Postgres> {
     }
 }
 
+pub fn timeseries_pool() -> &'static Pool<Postgres> {
+    match TIMESERIES_DB_POOL.get() {
+        Some(pool) => pool,
+        None => panic!("timeseries_db_pool is not initialized"),
+    }
+}
+
 pub async fn run_migration() -> Result<(), MigrateError> {
     sqlx::migrate!("./migrations").run(pool()).await
+}
+
+pub async fn run_timeseries_migration(pool: &Pool<Postgres>) -> Result<(), MigrateError> {
+    sqlx::migrate!("./timeseries_migrations").run(pool).await
 }

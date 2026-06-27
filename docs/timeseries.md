@@ -8,6 +8,14 @@ Run:
 cargo run -p timeseries
 ```
 
+Storage:
+
+- `TIMESERIES_DATABASE_URL` is required. It must point at a TimescaleDB database.
+- The timeseries service writes trade history, candles, and consumer offsets only through `TIMESERIES_DATABASE_URL`.
+- The REST server initializes a separate timeseries pool from `TIMESERIES_DATABASE_URL` for candle reads. All non-timeseries state continues to use `DATABASE_URL`.
+- The dedicated timeseries migration bundle enables the `timescaledb` extension and creates `candles` as a hypertable. Startup fails if TimescaleDB is unavailable.
+- `crates/db/migrations/0007_timeseries.sql` is retained unchanged for existing main database migration history. New runtime paths should not depend on the main Postgres timeseries tables.
+
 Source events:
 
 - `TradeExecuted` is the source for trades and candles.

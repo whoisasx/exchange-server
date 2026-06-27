@@ -3,7 +3,9 @@ use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use dotenvy::dotenv;
 
 use config::Config;
-use db::pool::{create_db_pool, init_pool, run_migration};
+use db::pool::{
+    create_db_pool, init_pool, init_timeseries_pool, run_migration, run_timeseries_migration,
+};
 
 use crate::{
     redpanda::{RedpandaProducer, ReplyConsumers},
@@ -38,6 +40,17 @@ async fn main() -> std::io::Result<()> {
         .expect("Database connection not established");
     init_pool(pool.clone());
     let _ = run_migration().await.expect("migrations failed");
+    let timeseries_database_url = config
+        .timeseries_database_url
+        .as_deref()
+        .expect("TIMESERIES_DATABASE_URL must be set");
+    let timeseries_pool = create_db_pool(timeseries_database_url)
+        .await
+        .expect("Timeseries database connection not established");
+    run_timeseries_migration(&timeseries_pool)
+        .await
+        .expect("timeseries migrations failed");
+    init_timeseries_pool(timeseries_pool);
 
     let port = config.server_port.clone();
     let host = config.server_host.clone();

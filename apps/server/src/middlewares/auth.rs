@@ -84,6 +84,7 @@ mod tests {
     fn test_config() -> Config {
         Config {
             database_url: String::from("postgres://localhost/test"),
+            timeseries_database_url: None,
             server_url: String::from("http://localhost:8080"),
             server_port: 8080,
             server_host: String::from("127.0.0.1"),
