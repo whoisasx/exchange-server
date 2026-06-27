@@ -21,6 +21,22 @@ SET next_offset=EXCLUDED.next_offset,
 WHERE projector_offsets.next_offset < EXCLUDED.next_offset
 "#;
 
+const INSERT_ENGINE_EVENT_LOG_SQL: &str = r#"
+INSERT INTO engine_event_log(
+    engine_event_id,
+    event_type,
+    market_id,
+    engine_sequence,
+    engine_timestamp_ms,
+    topic,
+    partition,
+    offset_value,
+    payload
+)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ON CONFLICT(engine_event_id) DO NOTHING
+"#;
+
 #[derive(Debug)]
 pub enum ProjectorRepositoryError {
     MissingOrderContext {
@@ -171,6 +187,21 @@ impl ProjectorRepository {
     ) -> Result<(), ProjectorRepositoryError> {
         let mut tx = self.pool.begin().await?;
         save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
+        tx.commit().await?;
+
+        Ok(())
+    }
+
+    pub async fn save_engine_event_log(
+        &self,
+        event: &EngineEvent,
+        topic: &str,
+        partition: i32,
+        next_offset: i64,
+    ) -> Result<(), ProjectorRepositoryError> {
+        let entry = engine_event_log_entry(event)?;
+        let mut tx = self.pool.begin().await?;
+        insert_engine_event_log_in_tx(&mut tx, &entry, topic, partition, next_offset).await?;
         tx.commit().await?;
 
         Ok(())
@@ -678,35 +709,7 @@ impl ProjectorRepository {
         let entry = engine_event_log_entry(event)?;
         let mut tx = self.pool.begin().await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO engine_event_log(
-                engine_event_id,
-                event_type,
-                market_id,
-                engine_sequence,
-                engine_timestamp_ms,
-                topic,
-                partition,
-                offset_value,
-                payload
-            )
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ON CONFLICT(engine_event_id) DO NOTHING
-            "#,
-        )
-        .bind(&entry.engine_event_id)
-        .bind(entry.event_type)
-        .bind(entry.market_id)
-        .bind(entry.engine_sequence)
-        .bind(entry.engine_timestamp_ms)
-        .bind(topic)
-        .bind(partition)
-        .bind(next_offset - 1)
-        .bind(&entry.payload)
-        .execute(&mut *tx)
-        .await?;
-
+        insert_engine_event_log_in_tx(&mut tx, &entry, topic, partition, next_offset).await?;
         save_queue_offset_in_tx(&mut tx, topic, partition, next_offset).await?;
         tx.commit().await?;
 
@@ -890,6 +893,29 @@ async fn save_queue_offset_in_tx(
         .bind(topic)
         .bind(partition)
         .bind(next_offset)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
+
+async fn insert_engine_event_log_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    entry: &EngineEventLogEntry,
+    topic: &str,
+    partition: i32,
+    next_offset: i64,
+) -> Result<(), ProjectorRepositoryError> {
+    sqlx::query(INSERT_ENGINE_EVENT_LOG_SQL)
+        .bind(&entry.engine_event_id)
+        .bind(entry.event_type)
+        .bind(entry.market_id)
+        .bind(entry.engine_sequence)
+        .bind(entry.engine_timestamp_ms)
+        .bind(topic)
+        .bind(partition)
+        .bind(next_offset - 1)
+        .bind(&entry.payload)
         .execute(&mut **tx)
         .await?;
 
@@ -2109,6 +2135,18 @@ mod tests {
 
         assert!(sql.contains("ON CONFLICT(topic, partition) DO UPDATE"));
         assert!(sql.contains("WHERE projector_offsets.next_offset < EXCLUDED.next_offset"));
+    }
+
+    #[test]
+    fn engine_event_log_insert_does_not_advance_queue_offset() {
+        let sql = INSERT_ENGINE_EVENT_LOG_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(sql.contains("INSERT INTO engine_event_log"));
+        assert!(sql.contains("ON CONFLICT(engine_event_id) DO NOTHING"));
+        assert!(!sql.contains("projector_offsets"));
     }
 
     #[test]

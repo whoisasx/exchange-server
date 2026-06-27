@@ -102,6 +102,11 @@ impl ProjectorWorker {
         partition: i32,
         next_offset: i64,
     ) -> Result<(), ProjectorError> {
+        self.repository
+            .save_engine_event_log(&event, topic, partition, next_offset)
+            .await
+            .map_err(projector_error)?;
+
         self.processor
             .process_engine_event(event, topic, partition, next_offset)
             .await

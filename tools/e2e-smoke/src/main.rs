@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, env, ops::Range, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+    ops::Range,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
@@ -58,7 +63,11 @@ struct Settings {
     ws_url: String,
     database_url: String,
     redpanda_brokers: String,
+    engine_input_topic: String,
+    engine_replies_topic: String,
     engine_events_topic: String,
+    wallet_commands_topic: String,
+    wallet_events_topic: String,
     mark_input_id: Option<String>,
 }
 
@@ -491,6 +500,7 @@ async fn main() -> Result<()> {
     wait_for_command_traces(&pool, &settings, &command_traces).await?;
     wait_for_wallet_outbox_drained(&pool).await?;
     wait_for_wallet_ledger_logical_event_ids(&pool).await?;
+    wait_for_consumer_offsets(&pool, &settings, &command_traces).await?;
 
     println!("e2e smoke passed");
     Ok(())
@@ -509,11 +519,40 @@ impl Settings {
             redpanda_brokers: env::var("E2E_REDPANDA_BROKERS")
                 .or_else(|_| env::var("REDPANDA_BROKERS"))
                 .unwrap_or_else(|_| String::from("127.0.0.1:19092")),
-            engine_events_topic: env::var("E2E_ENGINE_EVENTS_TOPIC")
-                .unwrap_or_else(|_| String::from("engine.events")),
+            engine_input_topic: topic_env(
+                "E2E_ENGINE_INPUT_TOPIC",
+                "ENGINE_INPUT_TOPIC",
+                "engine.input",
+            ),
+            engine_replies_topic: topic_env(
+                "E2E_ENGINE_REPLIES_TOPIC",
+                "ENGINE_REPLIES_TOPIC",
+                "engine.replies",
+            ),
+            engine_events_topic: topic_env(
+                "E2E_ENGINE_EVENTS_TOPIC",
+                "ENGINE_EVENTS_TOPIC",
+                "engine.events",
+            ),
+            wallet_commands_topic: topic_env(
+                "E2E_WALLET_COMMANDS_TOPIC",
+                "WALLET_COMMANDS_TOPIC",
+                "wallet.commands",
+            ),
+            wallet_events_topic: topic_env(
+                "E2E_WALLET_EVENTS_TOPIC",
+                "WALLET_EVENTS_TOPIC",
+                "wallet.events",
+            ),
             mark_input_id: env::var("E2E_MARK_INPUT_ID").ok(),
         }
     }
+}
+
+fn topic_env(e2e_key: &str, service_key: &str, default: &str) -> String {
+    env::var(e2e_key)
+        .or_else(|_| env::var(service_key))
+        .unwrap_or_else(|_| String::from(default))
 }
 
 async fn wait_for_server(client: &Client, server_url: &str, market: MarketSpec) -> Result<()> {
@@ -1863,6 +1902,556 @@ async fn wait_for_wallet_ledger_logical_event_ids(pool: &Pool<Postgres>) -> Resu
             && distinct_ledger_wallet_event_ids == ledger_wallet_events)
     })
     .await
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExpectedOffset {
+    partition: i32,
+    min_next_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct EngineEventTrace {
+    request_id: String,
+    source_input_id: String,
+    source_input_offset: i64,
+}
+
+async fn wait_for_consumer_offsets(
+    pool: &Pool<Postgres>,
+    settings: &Settings,
+    traces: &[CommandTrace],
+) -> Result<()> {
+    let wallet_command_request_ids = traces
+        .iter()
+        .map(|trace| trace.request_id.clone())
+        .collect::<BTreeSet<_>>();
+    let wallet_command_offsets = collect_request_offsets(
+        &settings.redpanda_brokers,
+        &settings.wallet_commands_topic,
+        &wallet_command_request_ids,
+    )
+    .await
+    .context("failed to collect wallet command offsets for smoke requests")?;
+
+    let engine_reply_request_ids = traces
+        .iter()
+        .filter(|trace| trace.expects_engine_input())
+        .map(|trace| trace.request_id.clone())
+        .collect::<BTreeSet<_>>();
+    let engine_reply_offsets = collect_request_offsets(
+        &settings.redpanda_brokers,
+        &settings.engine_replies_topic,
+        &engine_reply_request_ids,
+    )
+    .await
+    .context("failed to collect engine reply offsets for smoke requests")?;
+    let engine_event_offsets = collect_engine_event_offsets(
+        &settings.redpanda_brokers,
+        &settings.engine_events_topic,
+        traces,
+    )
+    .await
+    .context("failed to collect engine event offsets for smoke requests")?;
+
+    wait_for_projector_offsets_from_wallet_outbox(pool, &settings.engine_input_topic).await?;
+    wait_for_expected_offsets(
+        pool,
+        "projector_offsets",
+        &settings.engine_replies_topic,
+        &engine_reply_offsets,
+    )
+    .await?;
+    wait_for_expected_offsets(
+        pool,
+        "projector_offsets",
+        &settings.engine_events_topic,
+        &engine_event_offsets,
+    )
+    .await?;
+    wait_for_projector_offsets_from_wallet_outbox(pool, &settings.wallet_events_topic).await?;
+    wait_for_ledger_offsets_from_events(pool, &settings.wallet_events_topic).await?;
+    wait_for_expected_offsets(
+        pool,
+        "timeseries_offsets",
+        &settings.engine_events_topic,
+        &engine_event_offsets,
+    )
+    .await?;
+    wait_for_expected_offsets(
+        pool,
+        "wallet_queue_offsets",
+        &settings.wallet_commands_topic,
+        &wallet_command_offsets,
+    )
+    .await?;
+    wait_for_expected_offsets(
+        pool,
+        "wallet_queue_offsets",
+        &settings.engine_events_topic,
+        &engine_event_offsets,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn collect_request_offsets(
+    brokers: &str,
+    topic: &str,
+    request_ids: &BTreeSet<String>,
+) -> Result<Vec<ExpectedOffset>> {
+    if request_ids.is_empty() {
+        bail!("no request ids supplied for topic {topic}");
+    }
+
+    let client = ClientBuilder::new(parse_brokers(brokers)?)
+        .client_id(format!("exchange-e2e-smoke-offsets-{topic}"))
+        .build()
+        .await
+        .with_context(|| format!("failed to build redpanda offset scanner for {topic}"))?;
+    let topics = client
+        .list_topics()
+        .await
+        .context("failed to list redpanda topics for offset scanner")?;
+    let partitions = topics
+        .iter()
+        .find(|candidate| candidate.name == topic)
+        .map(|topic| topic.partitions.clone())
+        .ok_or_else(|| anyhow!("redpanda topic '{topic}' was not found"))?;
+
+    if partitions.is_empty() {
+        bail!("redpanda topic '{topic}' has no partitions");
+    }
+
+    let mut offsets = BTreeMap::<i32, i64>::new();
+    let mut matched_request_ids = BTreeSet::<String>::new();
+    for partition in partitions {
+        let partition_client = client
+            .partition_client(String::from(topic), partition, UnknownTopicHandling::Retry)
+            .await
+            .with_context(|| format!("failed to create offset scanner for {topic}[{partition}]"))?;
+        collect_partition_request_offsets(
+            topic,
+            &partition_client,
+            request_ids,
+            &mut offsets,
+            &mut matched_request_ids,
+        )
+        .await?;
+    }
+
+    let missing_request_ids = request_ids
+        .difference(&matched_request_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_request_ids.is_empty() {
+        bail!(
+            "missing records on topic {topic} for smoke request ids {:?}",
+            missing_request_ids
+        );
+    }
+
+    Ok(offsets
+        .into_iter()
+        .map(|(partition, min_next_offset)| ExpectedOffset {
+            partition,
+            min_next_offset,
+        })
+        .collect())
+}
+
+async fn collect_partition_request_offsets(
+    topic: &str,
+    partition: &PartitionClient,
+    request_ids: &BTreeSet<String>,
+    offsets: &mut BTreeMap<i32, i64>,
+    matched_request_ids: &mut BTreeSet<String>,
+) -> Result<()> {
+    let partition_id = partition.partition();
+    let mut next_offset = partition
+        .get_offset(OffsetAt::Earliest)
+        .await
+        .with_context(|| format!("failed to read {topic}[{partition_id}] earliest offset"))?;
+    let latest_offset = partition
+        .get_offset(OffsetAt::Latest)
+        .await
+        .with_context(|| format!("failed to read {topic}[{partition_id}] latest offset"))?;
+
+    while next_offset < latest_offset {
+        let (records, high_watermark) = partition
+            .fetch_records(next_offset, KAFKA_FETCH_BYTES, KAFKA_FETCH_MAX_WAIT_MS)
+            .await
+            .with_context(|| {
+                format!("failed to fetch {topic}[{partition_id}] from offset {next_offset}")
+            })?;
+
+        if records.is_empty() {
+            if next_offset >= high_watermark {
+                break;
+            }
+            continue;
+        }
+
+        for record in records {
+            next_offset = record.offset + 1;
+            let Some(payload) = record.record.value else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&payload) else {
+                continue;
+            };
+            let mut record_request_ids = BTreeSet::new();
+            collect_matching_request_ids(&value, request_ids, &mut record_request_ids);
+            if !record_request_ids.is_empty() {
+                matched_request_ids.extend(record_request_ids);
+                offsets
+                    .entry(partition_id)
+                    .and_modify(|offset| *offset = (*offset).max(record.offset + 1))
+                    .or_insert(record.offset + 1);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn collect_engine_event_offsets(
+    brokers: &str,
+    topic: &str,
+    traces: &[CommandTrace],
+) -> Result<Vec<ExpectedOffset>> {
+    let expected_traces = traces
+        .iter()
+        .filter(|trace| trace.expects_engine_input())
+        .map(|trace| {
+            let source_input_id = trace
+                .engine_source_input_id()
+                .ok_or_else(|| anyhow!("engine command trace missing source_input_id"))?;
+            let source_input_offset = trace
+                .engine_source_input_offset()
+                .ok_or_else(|| anyhow!("engine command trace missing source_input_offset"))?;
+
+            Ok(EngineEventTrace {
+                request_id: trace.request_id.clone(),
+                source_input_id: String::from(source_input_id),
+                source_input_offset,
+            })
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+
+    if expected_traces.is_empty() {
+        bail!("no engine event traces supplied for topic {topic}");
+    }
+
+    let client = ClientBuilder::new(parse_brokers(brokers)?)
+        .client_id(format!("exchange-e2e-smoke-engine-event-offsets-{topic}"))
+        .build()
+        .await
+        .with_context(|| {
+            format!("failed to build redpanda engine event offset scanner for {topic}")
+        })?;
+    let topics = client
+        .list_topics()
+        .await
+        .context("failed to list redpanda topics for engine event offset scanner")?;
+    let partitions = topics
+        .iter()
+        .find(|candidate| candidate.name == topic)
+        .map(|topic| topic.partitions.clone())
+        .ok_or_else(|| anyhow!("redpanda topic '{topic}' was not found"))?;
+
+    if partitions.is_empty() {
+        bail!("redpanda topic '{topic}' has no partitions");
+    }
+
+    let mut offsets = BTreeMap::<i32, i64>::new();
+    let mut matched_traces = BTreeSet::<EngineEventTrace>::new();
+    for partition in partitions {
+        let partition_client = client
+            .partition_client(String::from(topic), partition, UnknownTopicHandling::Retry)
+            .await
+            .with_context(|| {
+                format!("failed to create engine event offset scanner for {topic}[{partition}]")
+            })?;
+        collect_partition_engine_event_offsets(
+            topic,
+            &partition_client,
+            &expected_traces,
+            &mut offsets,
+            &mut matched_traces,
+        )
+        .await?;
+    }
+
+    let missing_traces = expected_traces
+        .difference(&matched_traces)
+        .map(engine_event_trace_summary)
+        .collect::<Vec<_>>();
+    if !missing_traces.is_empty() {
+        bail!(
+            "missing engine event records on topic {topic} for smoke traces {}",
+            missing_traces.join(",")
+        );
+    }
+
+    Ok(offsets
+        .into_iter()
+        .map(|(partition, min_next_offset)| ExpectedOffset {
+            partition,
+            min_next_offset,
+        })
+        .collect())
+}
+
+async fn collect_partition_engine_event_offsets(
+    topic: &str,
+    partition: &PartitionClient,
+    expected_traces: &BTreeSet<EngineEventTrace>,
+    offsets: &mut BTreeMap<i32, i64>,
+    matched_traces: &mut BTreeSet<EngineEventTrace>,
+) -> Result<()> {
+    let partition_id = partition.partition();
+    let mut next_offset = partition
+        .get_offset(OffsetAt::Earliest)
+        .await
+        .with_context(|| format!("failed to read {topic}[{partition_id}] earliest offset"))?;
+    let latest_offset = partition
+        .get_offset(OffsetAt::Latest)
+        .await
+        .with_context(|| format!("failed to read {topic}[{partition_id}] latest offset"))?;
+
+    while next_offset < latest_offset {
+        let (records, high_watermark) = partition
+            .fetch_records(next_offset, KAFKA_FETCH_BYTES, KAFKA_FETCH_MAX_WAIT_MS)
+            .await
+            .with_context(|| {
+                format!("failed to fetch {topic}[{partition_id}] from offset {next_offset}")
+            })?;
+
+        if records.is_empty() {
+            if next_offset >= high_watermark {
+                break;
+            }
+            continue;
+        }
+
+        for record in records {
+            next_offset = record.offset + 1;
+            let Some(payload) = record.record.value else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&payload) else {
+                continue;
+            };
+            let Some(trace) = engine_event_trace_from_value(&value) else {
+                continue;
+            };
+            if expected_traces.contains(&trace) {
+                matched_traces.insert(trace);
+                offsets
+                    .entry(partition_id)
+                    .and_modify(|offset| *offset = (*offset).max(record.offset + 1))
+                    .or_insert(record.offset + 1);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn engine_event_trace_from_value(value: &Value) -> Option<EngineEventTrace> {
+    Some(EngineEventTrace {
+        request_id: value.pointer("/payload/request_id")?.as_str()?.to_owned(),
+        source_input_id: value
+            .pointer("/payload/source_input_id")?
+            .as_str()?
+            .to_owned(),
+        source_input_offset: json_i64(value.pointer("/payload/source_input_offset"))?,
+    })
+}
+
+fn engine_event_trace_summary(trace: &EngineEventTrace) -> String {
+    format!(
+        "{}:{}@{}",
+        trace.request_id, trace.source_input_id, trace.source_input_offset
+    )
+}
+
+fn collect_matching_request_ids(
+    value: &Value,
+    request_ids: &BTreeSet<String>,
+    matched_request_ids: &mut BTreeSet<String>,
+) {
+    match value {
+        Value::Object(map) => {
+            if let Some(request_id) = map.get("request_id").and_then(Value::as_str)
+                && request_ids.contains(request_id)
+            {
+                matched_request_ids.insert(String::from(request_id));
+            }
+
+            for value in map.values() {
+                collect_matching_request_ids(value, request_ids, matched_request_ids);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_matching_request_ids(value, request_ids, matched_request_ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn wait_for_projector_offsets_from_wallet_outbox(
+    pool: &Pool<Postgres>,
+    topic: &str,
+) -> Result<()> {
+    let label = format!("projector_offsets topic={topic} to cover wallet_outbox published offsets");
+    wait_for_db(&label, || async {
+        let row = sqlx::query(
+            r#"
+            WITH expected AS (
+              SELECT
+                published_partition AS partition,
+                MAX(published_offset) + 1 AS min_next_offset
+              FROM wallet_outbox
+              WHERE topic=$1
+                AND status='PUBLISHED'
+                AND published_partition IS NOT NULL
+                AND published_offset IS NOT NULL
+              GROUP BY published_partition
+            )
+            SELECT
+              COUNT(*)::BIGINT AS expected_count,
+              COUNT(o.*)::BIGINT AS advanced_count
+            FROM expected e
+            LEFT JOIN projector_offsets o
+              ON o.topic=$1
+             AND o.partition=e.partition
+             AND o.next_offset >= e.min_next_offset
+            "#,
+        )
+        .bind(topic)
+        .fetch_one(pool)
+        .await?;
+
+        let expected_count = row.get::<i64, _>("expected_count");
+        let advanced_count = row.get::<i64, _>("advanced_count");
+        Ok(expected_count > 0 && advanced_count == expected_count)
+    })
+    .await
+}
+
+async fn wait_for_ledger_offsets_from_events(pool: &Pool<Postgres>, topic: &str) -> Result<()> {
+    let label = format!("ledger_offsets topic={topic} to cover ledger_events processed offsets");
+    wait_for_db(&label, || async {
+        let row = sqlx::query(
+            r#"
+            WITH expected AS (
+              SELECT partition, MAX(offset_value) + 1 AS min_next_offset
+              FROM ledger_events
+              WHERE topic=$1
+              GROUP BY partition
+            )
+            SELECT
+              COUNT(*)::BIGINT AS expected_count,
+              COUNT(o.*)::BIGINT AS advanced_count
+            FROM expected e
+            LEFT JOIN ledger_offsets o
+              ON o.topic=$1
+             AND o.partition=e.partition
+             AND o.next_offset >= e.min_next_offset
+            "#,
+        )
+        .bind(topic)
+        .fetch_one(pool)
+        .await?;
+
+        let expected_count = row.get::<i64, _>("expected_count");
+        let advanced_count = row.get::<i64, _>("advanced_count");
+        Ok(expected_count > 0 && advanced_count == expected_count)
+    })
+    .await
+}
+
+async fn wait_for_expected_offsets(
+    pool: &Pool<Postgres>,
+    offsets_table: &'static str,
+    topic: &str,
+    expected: &[ExpectedOffset],
+) -> Result<()> {
+    let label = format!(
+        "{offsets_table} topic={topic} consumed offsets {}",
+        expected_offsets_summary(expected)
+    );
+    wait_for_db(&label, || async {
+        let rows = match offsets_table {
+            "projector_offsets" => {
+                sqlx::query(
+                    r#"
+                    SELECT partition, next_offset
+                    FROM projector_offsets
+                    WHERE topic=$1
+                    "#,
+                )
+                .bind(topic)
+                .fetch_all(pool)
+                .await?
+            }
+            "wallet_queue_offsets" => {
+                sqlx::query(
+                    r#"
+                    SELECT partition, next_offset
+                    FROM wallet_queue_offsets
+                    WHERE topic=$1
+                    "#,
+                )
+                .bind(topic)
+                .fetch_all(pool)
+                .await?
+            }
+            "timeseries_offsets" => {
+                sqlx::query(
+                    r#"
+                    SELECT partition, next_offset
+                    FROM timeseries_offsets
+                    WHERE topic=$1
+                    "#,
+                )
+                .bind(topic)
+                .fetch_all(pool)
+                .await?
+            }
+            _ => unreachable!("unsupported offsets table {offsets_table}"),
+        };
+        let actual = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<i32, _>("partition"),
+                    row.get::<i64, _>("next_offset"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        Ok(!expected.is_empty()
+            && expected.iter().all(|expected| {
+                actual
+                    .get(&expected.partition)
+                    .is_some_and(|next_offset| *next_offset >= expected.min_next_offset)
+            }))
+    })
+    .await
+}
+
+fn expected_offsets_summary(expected: &[ExpectedOffset]) -> String {
+    expected
+        .iter()
+        .map(|offset| format!("[{}]>={}", offset.partition, offset.min_next_offset))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 async fn wait_for_db<F, Fut>(label: &str, mut check: F) -> Result<()>
