@@ -9,6 +9,17 @@ In this combined workspace, `cargo test -p protocol` reads
 `../../engine/docs/examples` first and falls back to `docs/examples` only when
 the sibling engine checkout is unavailable.
 
+```mermaid
+flowchart TD
+    contract[engine/docs/engine-contract.md] --> examples[engine/docs/examples]
+    contract --> engine[exchange-engine serializers/parsers]
+    contract --> exchangeTypes[exchange crates/protocol]
+
+    examples --> engineTests[engine protocol_fixture_tests]
+    examples --> exchangeTests[exchange cargo test -p protocol]
+    exchangeFallback[exchange docs/examples] -. fallback for standalone exchange .-> exchangeTests
+```
+
 When changing engine protocol fields or examples:
 
 1. Update `engine/docs/engine-contract.md` and `engine/docs/examples`.

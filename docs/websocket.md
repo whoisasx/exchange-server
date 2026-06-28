@@ -4,6 +4,21 @@
 
 It does not connect to Postgres, build read models, recover missed client messages, or own durable facts. `engine.events` and `wallet.events` must carry the account and market routing fields needed by websocket clients.
 
+```mermaid
+flowchart LR
+    engineEvents[(engine.events)] --> ws[apps/ws]
+    walletEvents[(wallet.events)] --> ws
+    client[Authenticated client] --> ws
+
+    ws --> account[AccountEvent<br/>private user route]
+    ws --> market[MarketEvent<br/>subscribed market route]
+
+    account --> client
+    market --> client
+
+    pg[(Postgres)] -. not used .-> ws
+```
+
 Run:
 
 ```sh

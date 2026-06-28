@@ -2,6 +2,27 @@
 
 The orderbook read model is a public market-data artifact built from `OrderBookDelta` events on `engine.events`. It is not an engine recovery checkpoint; engine recovery uses private checkpoint artifacts.
 
+```mermaid
+sequenceDiagram
+    participant E as Engine
+    participant RP as engine.events
+    participant P as Projector
+    participant DB as Postgres orderbook tables
+    participant WS as WebSocket
+    participant C as Client
+    participant API as Server REST
+
+    E->>RP: OrderBookDelta
+    RP->>P: Consume by offset
+    P->>DB: Upsert orderbook_state and levels
+    RP->>WS: Live market event
+    C->>WS: Subscribe market
+    C->>API: GET /markets/{id}/orderbook
+    API->>DB: Read snapshot
+    API-->>C: Snapshot with engine_sequence
+    WS-->>C: Buffered and future deltas
+```
+
 `OrderBookDelta` carries changed price levels only:
 
 ```json

@@ -14,6 +14,21 @@ Wallet events must carry `user_id` so consumers can route without database
 lookups. New wallet events also carry `event_id`, a stable logical id equal to
 the wallet outbox `dedupe_key`.
 
+```mermaid
+flowchart LR
+    command[wallet command or engine event] --> wallet[apps/wallet]
+    wallet --> balance[(wallet balances and reservations)]
+    wallet --> outbox[(wallet_outbox)]
+    outbox --> walletEvents[(wallet.events)]
+    outbox --> engineInput[(engine.input)]
+
+    walletEvents --> ledger[apps/ledger]
+    walletEvents --> ws[apps/ws]
+    engineInput --> engine[exchange-engine]
+    engine --> engineEvents[(engine.events)]
+    engineEvents --> wallet
+```
+
 Wallet does not publish these events directly from the command processing
 path. Balance and reservation mutations enqueue `WalletEvent` rows in
 `wallet_outbox` inside the same Postgres transaction. The wallet outbox relay

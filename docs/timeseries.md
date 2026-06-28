@@ -2,6 +2,20 @@
 
 `apps/timeseries` consumes `engine.events` and writes trade history and market candles.
 
+```mermaid
+flowchart LR
+    engine[Engine] --> events[(engine.events)]
+    events --> timeseries[apps/timeseries]
+    timeseries --> trades[(timeseries_trades)]
+    timeseries --> candles[(candles hypertable)]
+    timeseries --> offsets[(timeseries_offsets)]
+    candles --> server[apps/server]
+    server --> client[Client candle API]
+
+    events -. TradeExecuted only .-> timeseries
+    events -. mark/funding ignored for candles .-> timeseries
+```
+
 Run:
 
 ```sh

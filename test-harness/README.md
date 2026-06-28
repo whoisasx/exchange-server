@@ -4,6 +4,16 @@ This folder is the only manual test surface for the exchange repo. The exchange
 harness owns shared local infra and exchange services only; it does not start,
 stop, or probe the engine process.
 
+```mermaid
+flowchart LR
+    infra[test-harness/infra.sh up] --> containers[Postgres<br/>Redpanda<br/>TimescaleDB<br/>MinIO]
+    containers --> engine[engine test-harness/run-exchange-e2e-engine.sh]
+    containers --> smoke[test-harness/smoke.sh]
+    engine --> smoke
+    smoke --> result[e2e smoke passed]
+    result --> down[test-harness/infra.sh down]
+```
+
 ## Get the Repos
 
 Use sibling checkouts so the exchange and engine harness docs line up:

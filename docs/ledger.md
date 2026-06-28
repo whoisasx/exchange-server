@@ -3,6 +3,19 @@
 `apps/ledger` consumes `wallet.events` and writes an immutable accounting
 trail. Wallet events are the source of balance mutations.
 
+```mermaid
+flowchart LR
+    wallet[apps/wallet] --> outbox[(wallet_outbox)]
+    outbox --> events[(wallet.events)]
+    events --> ledger[apps/ledger]
+    ledger --> journal[(ledger_events)]
+    ledger --> entries[(ledger_entries)]
+    ledger --> offsets[(ledger_offsets)]
+
+    engineEvents[(engine.events)] -. audit context .-> wallet
+    engineEvents -. not accounting facts .-> ledger
+```
+
 Run:
 
 ```sh
