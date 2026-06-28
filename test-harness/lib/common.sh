@@ -4,7 +4,7 @@ if [[ -z "${ROOT_DIR:-}" ]]; then
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
 
-COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/scripts/e2e-compose.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-$ROOT_DIR/test-harness/e2e-compose.yml}"
 PROJECT_NAME="${E2E_COMPOSE_PROJECT:-exchange-e2e}"
 POSTGRES_PORT="${E2E_POSTGRES_PORT:-55432}"
 REDPANDA_PORT="${E2E_REDPANDA_PORT:-19092}"
@@ -91,7 +91,7 @@ timescale_sql_ready() {
 }
 
 apply_timescale_init() {
-  timescale_psql -v ON_ERROR_STOP=1 -f - <"$ROOT_DIR/scripts/timescale-init/001_timescaledb.sql"
+  timescale_psql -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
 }
 
 timeseries_database_migrations_ready() {
@@ -120,7 +120,7 @@ wait_for_storage_setup() {
 
 setup_storage_infra() {
   echo "applying Timescale init"
-  wait_until timescale-init apply_timescale_init
+  wait_until timescale-extension-create apply_timescale_init
   wait_until timescale-extension timescale_extension_ready
   wait_until minio-bucket-create create_minio_bucket
   wait_until minio-bucket minio_bucket_exists

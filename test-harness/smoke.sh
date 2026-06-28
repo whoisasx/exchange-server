@@ -3,14 +3,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-source "$ROOT_DIR/scripts/e2e/common.sh"
-source "$ROOT_DIR/scripts/e2e/redpanda.sh"
+source "$ROOT_DIR/test-harness/lib/common.sh"
+source "$ROOT_DIR/test-harness/lib/redpanda.sh"
 
 PIDS=()
 SERVICE_NAMES=()
 SERVICE_PIDS=()
 
-source "$ROOT_DIR/scripts/e2e/exchange-services.sh"
+source "$ROOT_DIR/test-harness/lib/exchange-services.sh"
 
 print_failure_context() {
   local lines="${E2E_LOG_TAIL_LINES:-120}"

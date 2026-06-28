@@ -3,12 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-source "$ROOT_DIR/scripts/e2e/common.sh"
-source "$ROOT_DIR/scripts/e2e/redpanda.sh"
+source "$ROOT_DIR/test-harness/lib/common.sh"
+source "$ROOT_DIR/test-harness/lib/redpanda.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/e2e-infra.sh [up|down|status|logs]
+Usage: test-harness/infra.sh [up|down|status|logs]
 
 Commands:
   up      Start and prepare Postgres, Redpanda, TimescaleDB, and MinIO.
@@ -17,7 +17,7 @@ Commands:
   logs    Print compose infra logs.
 
 Run `up`, ensure the independently managed engine is using this infra, then run
-`scripts/e2e-smoke.sh`.
+`test-harness/smoke.sh`.
 USAGE
 }
 
@@ -44,7 +44,7 @@ e2e infra ready
 
 Run the exchange smoke when the independently managed engine is consuming
 engine.input and publishing engine.replies plus engine.events:
-  scripts/e2e-smoke.sh
+  test-harness/smoke.sh
 EOF_READY
     ;;
   down)

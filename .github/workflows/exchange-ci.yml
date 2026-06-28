@@ -39,8 +39,8 @@ jobs:
 
       - name: Run exchange tests with infra
         run: |
-          trap 'scripts/e2e-infra.sh down' EXIT
-          scripts/e2e-infra.sh up
+          trap 'test-harness/infra.sh down' EXIT
+          test-harness/infra.sh up
           env DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/exchange \
             sqlx migrate run --source crates/db/migrations
           env \
