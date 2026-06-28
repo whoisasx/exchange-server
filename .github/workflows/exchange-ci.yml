@@ -9,28 +9,16 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CPP_ENGINE_REPOSITORY: ${{ vars.CPP_ENGINE_REPOSITORY || 'whoisasx/exchange-engine' }}
 
 jobs:
-  fmt-test-smoke:
-    name: fmt, test, smoke
+  fmt-test:
+    name: fmt, test
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Checkout C++ engine
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.CPP_ENGINE_REPOSITORY }}
-          path: engine
-
-      - name: Install C++ engine dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake librdkafka-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -40,16 +28,27 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
+      - name: Install SQLx CLI
+        run: cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres
+
       - name: Check formatting
         run: cargo fmt --all -- --check
-
-      - name: Run tests
-        run: cargo test --workspace --locked
 
       - name: Check Docker Compose
         run: docker compose version
 
-      - name: Run e2e smoke
-        env:
-          E2E_CPP_ENGINE_DIR: ${{ github.workspace }}/engine
-        run: scripts/e2e-smoke.sh
+      - name: Run exchange tests with infra
+        run: |
+          trap 'scripts/e2e-infra.sh down' EXIT
+          scripts/e2e-infra.sh up
+          env DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/exchange \
+            sqlx migrate run --source crates/db/migrations
+          env \
+            DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/exchange \
+            TIMESERIES_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55433/exchange_timeseries \
+            S3_ENDPOINT=http://127.0.0.1:59000 \
+            S3_REGION=us-east-1 \
+            S3_BUCKET=exchange-checkpoints \
+            S3_ACCESS_KEY_ID=minioadmin \
+            S3_SECRET_ACCESS_KEY=minioadmin \
+            cargo test --workspace --locked

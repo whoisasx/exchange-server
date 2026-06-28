@@ -1,62 +1,54 @@
-# E2E Smoke Harness
+# Test Harness
 
-The smoke harness runs the Rust exchange services against the C++ matching engine.
+This is the canonical local test path for the exchange. The matching engine is
+an external stream participant: exchange does not start it, stop it, or probe
+its process health.
 
-Run it from the exchange checkout:
+Run it from the exchange checkout in this order:
 
 ```sh
+scripts/e2e-infra.sh up
+# ensure the independently managed engine is using this infra
 scripts/e2e-smoke.sh
+scripts/e2e-infra.sh down
 ```
 
-By default the script expects the C++ engine checkout at `../engine`. Use
-`E2E_CPP_ENGINE_DIR` when the engine lives elsewhere:
+`scripts/e2e-infra.sh up` starts the four local infra containers, applies
+TimescaleDB setup, creates/clears the MinIO checkpoint bucket, and creates the
+Redpanda topics. `scripts/e2e-smoke.sh` checks the prepared exchange infra, runs
+the Rust exchange test suite, starts the exchange services, and drives the REST
+and websocket flow with `tools/e2e-smoke`. If no engine consumes `engine.input`
+and publishes `engine.replies` plus `engine.events`, the flow times out through
+normal request/event assertions.
 
-```sh
-E2E_CPP_ENGINE_DIR=/path/to/engine scripts/e2e-smoke.sh
-```
+Infra:
 
-The GitHub workflow checks out the C++ engine from `whoisasx/exchange-engine` by
-default. Set the repository variable `CPP_ENGINE_REPOSITORY` when CI should use
-a different engine repository.
+- Postgres, Redpanda, TimescaleDB, and MinIO are started from
+  `scripts/e2e-compose.yml`.
+- TimescaleDB uses `timescale/timescaledb:latest-pg16`.
+- MinIO uses `minio/minio:latest`.
 
-The script starts local Postgres and Redpanda with Docker Compose, starts
-TimescaleDB and MinIO as direct Docker containers, creates stream topics, builds
-`engine_app`, starts `wallet`, `projector`, `timeseries`, `ledger`,
-`cpp-engine`, `ws`, and `server`, then drives the REST and websocket flow with
-`tools/e2e-smoke`.
+Test coverage:
 
-The smoke harness creates or validates the named direct containers
-`perpex-timescaledb` from `timescale/timescaledb:latest-pg16` and
-`perpex-minio` from `minio/minio:latest`. It waits for TimescaleDB on
-`127.0.0.1:55433` and MinIO on `127.0.0.1:59000`, exposes the MinIO console on
-`127.0.0.1:59001`, applies `scripts/timescale-init/001_timescaledb.sql`, checks
-that the `timescaledb` extension is installed, creates the MinIO checkpoint
-bucket with `minio/mc`, and clears that bucket before the run.
+- `cargo test --workspace`
+- full E2E flow through server, wallet, the external engine, stream consumers,
+  TimescaleDB, and websocket delivery
+
+The infra harness waits for TimescaleDB on `127.0.0.1:55433` and MinIO on
+`127.0.0.1:59000`, exposes the MinIO console on `127.0.0.1:59001`, applies
+`scripts/timescale-init/001_timescaledb.sql`, checks that the `timescaledb`
+extension is installed, creates the MinIO checkpoint bucket with an ephemeral
+`minio/mc` helper container, and clears that bucket before the run.
 
 The harness passes
 `TIMESERIES_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55433/exchange_timeseries`
 to `timeseries`, `server`, and `tools/e2e-smoke`. The smoke driver keeps core
 exchange assertions on the main `DATABASE_URL`, but reads candle and
-`timeseries_offsets` assertions from `TIMESERIES_DATABASE_URL`. The C++ engine
-receives `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`,
-`S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE`, AWS-compatible aliases, and the
-engine checkpoint aliases `CEX_ENGINE_CHECKPOINT_S3_ENDPOINT`,
-`CEX_ENGINE_CHECKPOINT_S3_BUCKET`, `CEX_ENGINE_CHECKPOINT_S3_ACCESS_KEY`,
-`CEX_ENGINE_CHECKPOINT_S3_SECRET_KEY`, and
-`CEX_ENGINE_CHECKPOINT_S3_REGION`. After the smoke driver succeeds, the harness
-fails unless MinIO contains at least one `*.checkpoint` object.
+`timeseries_offsets` assertions from `TIMESERIES_DATABASE_URL`.
 
-Default storage values can be overridden with `E2E_TIMESCALE_PORT`,
-`E2E_TIMESCALE_CONTAINER`, `E2E_TIMESCALE_VOLUME`, `TIMESCALE_IMAGE`,
-`TIMESCALE_DB`, `TIMESCALE_USER`, `TIMESCALE_PASSWORD`, `E2E_MINIO_PORT`,
-`E2E_MINIO_CONSOLE_PORT`, `E2E_MINIO_CONTAINER`, `E2E_MINIO_VOLUME`,
-`MINIO_IMAGE`, `MINIO_MC_IMAGE`, `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`,
-`S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY`.
-
-The harness provisions `engine.input` as a single-partition topic with
-`retention.ms=1800000`, writes a two-market C++ engine config for `SOL-PERP`
-and `ETH-PERP`, and uses an isolated checkpoint/build directory under
-`target/e2e-smoke`. It queues one mark-price input through `tools/engine-ingress` and
+The infra harness provisions `engine.input` as a single-partition topic with
+`retention.ms=1800000` and keeps exchange service logs under `target/e2e-smoke`.
+The smoke queues one mark-price input through `tools/engine-ingress` and
 verifies the wallet outbox relay publishes that row. The smoke driver also waits
 for `wallet_outbox` to drain and checks that ledger rows consumed from
 `wallet.events` have unique logical event ids.

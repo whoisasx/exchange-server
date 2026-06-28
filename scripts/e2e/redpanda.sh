@@ -67,3 +67,25 @@ create_engine_input_topic() {
   set_topic_config engine.input retention.ms=1800000
   assert_topic_partitions engine.input 1
 }
+
+create_e2e_topics() {
+  local topic
+
+  echo "creating redpanda topics"
+  for topic in wallet.commands wallet.replies wallet.events engine.input engine.replies engine.events; do
+    if [[ "$topic" == "engine.input" ]]; then
+      create_engine_input_topic
+    else
+      create_topic "$topic" 3
+    fi
+  done
+}
+
+assert_e2e_topics_ready() {
+  assert_topic_partitions wallet.commands 3
+  assert_topic_partitions wallet.replies 3
+  assert_topic_partitions wallet.events 3
+  assert_topic_partitions engine.input 1
+  assert_topic_partitions engine.replies 3
+  assert_topic_partitions engine.events 3
+}
