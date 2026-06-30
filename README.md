@@ -124,6 +124,32 @@ git clone git@github.com:whoisasx/exchange-server.git exchange
 git clone git@github.com:whoisasx/exchange-engine.git engine
 ```
 
+## Storage Containers
+
+All required local data/storage services are started by the exchange harness:
+
+```sh
+cd ~/perpex/exchange
+test-harness/infra.sh up
+```
+
+This starts and prepares:
+
+| Container | Purpose | Local endpoint |
+|---|---|---|
+| Postgres | Main exchange DB: users, balances, orders, projector rows, ledger rows, wallet outbox | `postgres://postgres:postgres@127.0.0.1:55432/exchange` |
+| Redpanda | Streams and queues: `wallet.commands`, `wallet.events`, `engine.input`, `engine.replies`, `engine.events` | `127.0.0.1:19092` |
+| TimescaleDB | Time-series DB for trades and candles | `postgres://postgres:postgres@127.0.0.1:55433/exchange_timeseries` |
+| MinIO | S3-compatible object storage for engine checkpoints | `http://127.0.0.1:59000` |
+
+`infra.sh up` also creates Redpanda topics, creates the Timescale extension,
+creates the MinIO bucket `exchange-checkpoints`, and clears old checkpoint
+objects. Stop and remove local infra with:
+
+```sh
+test-harness/infra.sh down
+```
+
 ## Run The Full E2E Test
 
 From this repo:
