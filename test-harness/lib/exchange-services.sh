@@ -15,6 +15,7 @@ start_service() {
   local binary="$1"
   local log_file="$LOG_DIR/${binary}.log"
   local service_database_url="$DATABASE_URL"
+  local service_bin_dir="${SERVICE_BIN_DIR:-$ROOT_DIR/target/debug}"
   local pid
 
   if [[ "$binary" == "timeseries" ]]; then
@@ -35,7 +36,7 @@ start_service() {
       REDPANDA_BROKERS="127.0.0.1:${REDPANDA_PORT}" \
       SERVER_REPLY_PARTITION="0" \
       REQUEST_WAIT_TIMEOUT_MS="${E2E_REQUEST_WAIT_TIMEOUT_MS:-8000}" \
-      "$ROOT_DIR/target/debug/$binary"
+      "$service_bin_dir/$binary"
   ) >"$log_file" 2>&1 &
 
   pid="$!"

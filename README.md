@@ -90,9 +90,14 @@ crates/config     Shared env/config helpers
 crates/db         Database access and migrations
 crates/protocol   Rust stream protocol types
 tools/e2e-smoke   End-to-end smoke driver
+tools/exchange-bench-driver
+                  Exchange command-flow benchmark load driver
+tools/exchange-bench-engine-peer
+                  Benchmark-only engine peer for exchange latency tests
 tools/engine-ingress
                   Manual mark/funding input publisher
 test-harness      Manual infra and e2e test scripts
+bench-harness     Exchange benchmark scripts
 docs              Protocol notes and service-specific details
 ```
 
@@ -166,6 +171,46 @@ test-harness/infra.sh status
 test-harness/infra.sh logs
 ```
 
+## Run Benchmarks
+
+Exchange benchmarks measure the API-to-wallet-to-stream command flow. The
+benchmark uses JSON protocol messages and starts a small benchmark-only engine
+peer so this repo can measure its own latency without depending on a live engine
+process.
+
+```mermaid
+flowchart LR
+    driver[exchange-bench-driver] --> server[server]
+    server --> commands[(wallet.commands)]
+    commands --> wallet[wallet]
+    wallet --> outbox[(wallet_outbox)]
+    outbox --> input[(engine.input)]
+    input --> peer[benchmark engine peer]
+    peer --> replies[(engine.replies)]
+    peer --> events[(engine.events)]
+    replies --> server
+```
+
+Run the command-flow benchmark:
+
+```sh
+bench-harness/run-command-flow.sh
+```
+
+Smoke-sized run:
+
+```sh
+EXCHANGE_BENCH_COMMANDS=100 EXCHANGE_BENCH_WARMUP=10 bench-harness/run-command-flow.sh
+```
+
+Results are written to `target/exchange-bench/<run id>/`.
+
+Stop benchmark infra when you are done:
+
+```sh
+test-harness/infra.sh down
+```
+
 ## Configuration
 
 Start from `.env.example` for local service runs. The main connection points are:
@@ -179,6 +224,7 @@ Start from `.env.example` for local service runs. The main connection points are
 ## More Detail
 
 - [Test harness](test-harness/README.md)
+- [Benchmark harness](bench-harness/README.md)
 - [Engine stream contract](docs/engine-contract.md)
 - [Wallet events](docs/wallet-events.md)
 - [Timeseries](docs/timeseries.md)

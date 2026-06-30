@@ -855,6 +855,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "exchange-bench-driver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "exchange-bench-engine-peer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "protocol",
+ "rskafka",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -12,6 +12,8 @@ members = [
   "crates/db",
   "crates/protocol",
   "tools/e2e-smoke",
+  "tools/exchange-bench-driver",
+  "tools/exchange-bench-engine-peer",
   "tools/engine-ingress",
 ]
 
