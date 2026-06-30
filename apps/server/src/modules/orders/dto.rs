@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_LEVERAGE: i64 = 1;
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 pub struct PlaceOrder {
     pub market_id: i64,
     pub market_name: String,
@@ -20,7 +19,6 @@ pub struct PlaceOrder {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 pub struct CancelOrder {
     pub market_id: i64,
     pub order_id: i64,

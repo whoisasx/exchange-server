@@ -1,12 +1,11 @@
 # Perpex Exchange
 
-Rust services for the exchange side of Perpex: HTTP API, wallet reservation and
-accounting, stream consumers, read models, timeseries writes, and websocket
-fanout.
+Rust exchange services for Perpex: HTTP API, wallet reservation and accounting,
+stream consumers, read models, time-series writes, and websocket fanout.
 
-The matching engine is a separate repo and process. Exchange publishes validated
-inputs to `engine.input` and consumes `engine.replies` plus `engine.events`; it
-does not start, stop, or probe the engine.
+The matching engine is a separate process. Exchange publishes validated inputs
+to `engine.input` and consumes `engine.replies` plus `engine.events`; it does
+not start, stop, or probe the engine.
 
 ## Architecture
 
@@ -15,37 +14,34 @@ flowchart LR
     client[Client] --> server[apps/server<br/>REST API]
     client --> ws[apps/ws<br/>WebSocket]
 
-    server --> walletCommands[(wallet.commands)]
-    walletCommands --> wallet[apps/wallet]
-    wallet --> pg[(Postgres<br/>exchange state)]
+    server --> commands[(wallet.commands)]
+    commands --> wallet[apps/wallet]
+    wallet --> pg[(Postgres)]
 
-    wallet --> walletOutbox[(wallet_outbox)]
-    walletOutbox --> walletEvents[(wallet.events)]
-    walletOutbox --> engineInput[(engine.input)]
+    wallet --> outbox[(wallet_outbox)]
+    outbox --> walletEvents[(wallet.events)]
+    outbox --> engineInput[(engine.input)]
 
-    engineInput --> engine[exchange-engine<br/>external process]
-    engine --> engineReplies[(engine.replies)]
-    engine --> engineEvents[(engine.events)]
+    engineInput --> engine[exchange-engine]
+    engine --> replies[(engine.replies)]
+    engine --> events[(engine.events)]
 
-    engineReplies --> server
-    engineReplies --> wallet
-    engineEvents --> wallet
-    engineEvents --> projector[apps/projector]
-    engineEvents --> timeseries[apps/timeseries]
-    engineEvents --> ws
+    replies --> server
+    replies --> wallet
+    events --> wallet
+    events --> projector[apps/projector]
+    events --> timeseries[apps/timeseries]
+    events --> ws
     walletEvents --> ledger[apps/ledger]
     walletEvents --> ws
 
     projector --> pg
     ledger --> pg
-    server --> pg
     timeseries --> ts[(TimescaleDB)]
-    server --> ts
-
     engine -. checkpoints .-> s3[(MinIO / S3)]
 ```
 
-## Request Flow
+## Flow
 
 ```mermaid
 sequenceDiagram
@@ -71,51 +67,45 @@ sequenceDiagram
     E->>TS: engine.events
     E->>WS: engine.events
     L->>S: Ledger rows in Postgres
-    P->>S: Orders, fills, positions, orderbook in Postgres
+    P->>S: Read models in Postgres
     TS->>S: Candles in TimescaleDB
     WS->>C: Live account and market updates
     S->>C: Request result / REST reads
 ```
 
-## Repo Layout
+## Core Features
+
+- REST API for auth, market data, orders, positions, and account reads.
+- Wallet service for balance validation, locking, settlement, and outbox writes.
+- Redpanda stream integration for wallet commands, wallet events, engine input,
+  engine replies, and engine events.
+- Projector, ledger, timeseries, and websocket consumers.
+- Postgres, TimescaleDB, Redpanda, and MinIO local harness.
+- Separate exchange benchmark harness for the API-to-wallet-to-stream path.
+
+## Project Structure
 
 ```text
-apps/server       HTTP API and request/reply coordination
-apps/wallet       Balance checks, locks, wallet events, engine input outbox
-apps/projector    Engine event projections into Postgres read models
-apps/ledger       Accounting journal from wallet.events
-apps/timeseries   Trades and candles in TimescaleDB
-apps/ws           Live websocket fanout from wallet.events and engine.events
-crates/config     Shared env/config helpers
-crates/db         Database access and migrations
-crates/protocol   Rust stream protocol types
-tools/e2e-smoke   End-to-end smoke driver
-tools/exchange-bench-driver
-                  Exchange command-flow benchmark load driver
-tools/exchange-bench-engine-peer
-                  Benchmark-only engine peer for exchange latency tests
+apps/server        HTTP API and request/reply coordination
+apps/wallet        Balance checks, locks, wallet events, engine input outbox
+apps/projector     Engine event projections into Postgres read models
+apps/ledger        Accounting journal from wallet.events
+apps/timeseries    Trades and candles in TimescaleDB
+apps/ws            Live websocket fanout from wallet.events and engine.events
+crates/config      Shared env/config helpers
+crates/db          Database access and migrations
+crates/protocol    Rust stream protocol types
+tools/e2e-smoke    End-to-end smoke driver
 tools/engine-ingress
-                  Manual mark/funding input publisher
-test-harness      Manual infra and e2e test scripts
-bench-harness     Exchange benchmark scripts
-docs              Protocol notes and service-specific details
+                   Manual mark/funding input publisher
+bench-harness      Exchange benchmark scripts
+test-harness       Manual infra and e2e test scripts
+docs               Protocol, service, local development, and configuration docs
 ```
 
-## Getting Started
+## Quick Start
 
-Prerequisites:
-
-- Rust stable
-- Docker with Compose
-- `sqlx-cli` for migrations in the harness
-
-Install SQLx CLI:
-
-```sh
-cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres
-```
-
-Use sibling repo checkouts:
+Use sibling checkouts:
 
 ```sh
 mkdir -p ~/perpex
@@ -124,85 +114,38 @@ git clone git@github.com:whoisasx/exchange-server.git exchange
 git clone git@github.com:whoisasx/exchange-engine.git engine
 ```
 
-## Storage Containers
-
-All required local data/storage services are started by the exchange harness:
+Start local infra:
 
 ```sh
 cd ~/perpex/exchange
 test-harness/infra.sh up
 ```
 
-This starts and prepares:
-
-| Container | Purpose | Local endpoint |
-|---|---|---|
-| Postgres | Main exchange DB: users, balances, orders, projector rows, ledger rows, wallet outbox | `postgres://postgres:postgres@127.0.0.1:55432/exchange` |
-| Redpanda | Streams and queues: `wallet.commands`, `wallet.events`, `engine.input`, `engine.replies`, `engine.events` | `127.0.0.1:19092` |
-| TimescaleDB | Time-series DB for trades and candles | `postgres://postgres:postgres@127.0.0.1:55433/exchange_timeseries` |
-| MinIO | S3-compatible object storage for engine checkpoints | `http://127.0.0.1:59000` |
-
-`infra.sh up` also creates Redpanda topics, creates the Timescale extension,
-creates the MinIO bucket `exchange-checkpoints`, and clears old checkpoint
-objects. Stop and remove local infra with:
+Start the engine in another terminal:
 
 ```sh
-test-harness/infra.sh down
-```
-
-## Run The Full E2E Test
-
-From this repo:
-
-```sh
-test-harness/infra.sh up
-```
-
-In another terminal, start the engine:
-
-```sh
-cd ../engine
+cd ~/perpex/engine
 test-harness/run-exchange-e2e-engine.sh
 ```
 
-Then run the exchange smoke:
+Run the exchange smoke:
 
 ```sh
-cd ../exchange
+cd ~/perpex/exchange
 test-harness/smoke.sh
 ```
 
-Expected success:
+Expected result:
 
 ```text
 e2e smoke passed
 e2e smoke complete
 ```
 
-Cleanup:
+## Benchmarks
 
-```sh
-cd ../exchange
-test-harness/infra.sh down
-```
-
-Stop the engine with `Ctrl-C`.
-
-## Useful Commands
-
-```sh
-cargo fmt --all -- --check
-cargo test --workspace
-test-harness/infra.sh status
-test-harness/infra.sh logs
-```
-
-## Run Benchmarks
-
-Exchange benchmarks measure the API-to-wallet-to-stream command flow. The
-benchmark uses JSON protocol messages and starts a small benchmark-only engine
-peer so this repo can measure its own latency without depending on a live engine
-process.
+Exchange benchmarks measure the API-to-wallet-to-stream command path without
+depending on the real engine process.
 
 ```mermaid
 flowchart LR
@@ -213,42 +156,33 @@ flowchart LR
     outbox --> input[(engine.input)]
     input --> peer[benchmark engine peer]
     peer --> replies[(engine.replies)]
-    peer --> events[(engine.events)]
     replies --> server
 ```
 
-Run the command-flow benchmark:
+Run the benchmark:
 
 ```sh
 bench-harness/run-command-flow.sh
 ```
 
-Smoke-sized run:
+See [bench-harness/README.md](bench-harness/README.md) for what is timed,
+result fields, and benchmark-only engine peer details.
 
-```sh
-EXCHANGE_BENCH_COMMANDS=100 EXCHANGE_BENCH_WARMUP=10 bench-harness/run-command-flow.sh
-```
+## Tech Stack
 
-Results are written to `target/exchange-bench/<run id>/`.
+- Language: Rust
+- Runtime: Tokio
+- Web/API: Actix Web
+- Database: Postgres
+- Time-series: TimescaleDB
+- Streams: Redpanda / Kafka protocol
+- Object storage: MinIO / S3-compatible storage
+- Serialization: Serde JSON protocol shared with engine
 
-Stop benchmark infra when you are done:
+## Documentation
 
-```sh
-test-harness/infra.sh down
-```
-
-## Configuration
-
-Start from `.env.example` for local service runs. The main connection points are:
-
-- `DATABASE_URL`: Postgres exchange state
-- `TIMESERIES_DATABASE_URL`: TimescaleDB candles/trades
-- `REDPANDA_BROKERS`: Redpanda brokers
-- `S3_*`: MinIO/S3 checkpoint settings used by tests and engine-adjacent flows
-- `JWT_SECRET`, `SERVER_*`, `WS_*`: API and websocket settings
-
-## More Detail
-
+- [Local development](docs/local-development.md)
+- [Configuration](docs/configuration.md)
 - [Test harness](test-harness/README.md)
 - [Benchmark harness](bench-harness/README.md)
 - [Engine stream contract](docs/engine-contract.md)
