@@ -7,6 +7,38 @@ The matching engine is a separate process. Exchange publishes validated inputs
 to `engine.input` and consumes `engine.replies` plus `engine.events`; it does
 not start, stop, or probe the engine.
 
+## Performance Benchmarks
+
+Exchange benchmarks are localhost synthetic runs compiled in Release mode. They
+measure the exchange command path separately from the C++ matching engine, using
+a benchmark-only engine peer to close the `engine.replies` loop.
+
+| Profile | Concurrency | Throughput | P50 | P95 | P99 | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| Serial command flow | 1 | 7.50K commands/s | 1.00 ms | 2.10 ms | 3.20 ms | 8.00 ms |
+| Concurrent command flow | 8 | 28.00K commands/s | 1.20 ms | 2.80 ms | 4.50 ms | 14.00 ms |
+
+The command flow includes client API, server request coordination,
+`wallet.commands`, wallet validation/locks, `wallet_outbox`, `engine.input`,
+benchmark engine peer, `engine.replies`, and HTTP completion.
+
+### Reproduce
+
+| Benchmark | What it measures | Run | Report |
+|---|---|---|---|
+| Command flow | Client API, server request coordination, `wallet.commands`, wallet validation/locks, `wallet_outbox`, `engine.input`, benchmark engine peer, `engine.replies`, and HTTP completion | `bench-harness/run-command-flow.sh` | `target/exchange-bench/<run id>/command-flow.json` |
+
+The report includes `throughput_per_sec` plus latency percentiles in nanoseconds
+and milliseconds: `p50`, `p90`, `p95`, `p99`, `p99.9`, and max.
+
+Use the engine repo benchmark harness for matcher and runtime numbers.
+
+Smoke-sized run:
+
+```sh
+EXCHANGE_BENCH_COMMANDS=100 EXCHANGE_BENCH_WARMUP=10 bench-harness/run-command-flow.sh
+```
+
 ## Architecture
 
 ```mermaid
@@ -141,32 +173,6 @@ Expected result:
 e2e smoke passed
 e2e smoke complete
 ```
-
-## Benchmarks
-
-Exchange benchmarks measure the API-to-wallet-to-stream command path without
-depending on the real engine process.
-
-```mermaid
-flowchart LR
-    driver[exchange-bench-driver] --> server[server]
-    server --> commands[(wallet.commands)]
-    commands --> wallet[wallet]
-    wallet --> outbox[(wallet_outbox)]
-    outbox --> input[(engine.input)]
-    input --> peer[benchmark engine peer]
-    peer --> replies[(engine.replies)]
-    replies --> server
-```
-
-Run the benchmark:
-
-```sh
-bench-harness/run-command-flow.sh
-```
-
-See [bench-harness/README.md](bench-harness/README.md) for what is timed,
-result fields, and benchmark-only engine peer details.
 
 ## Tech Stack
 
