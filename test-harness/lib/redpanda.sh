@@ -63,9 +63,19 @@ assert_topic_partitions() {
 }
 
 create_engine_input_topic() {
-  create_topic engine.input 1 -c retention.ms=1800000
+  local partitions="${ENGINE_INPUT_PARTITIONS:-8}"
+  local actual
+  local missing
+
+  create_topic engine.input "$partitions" -c retention.ms=1800000
   set_topic_config engine.input retention.ms=1800000
-  assert_topic_partitions engine.input 1
+  actual="$(topic_partitions engine.input || true)"
+  if [[ -n "$actual" && "$actual" =~ ^[0-9]+$ && "$actual" -lt "$partitions" ]]; then
+    missing=$((partitions - actual))
+    compose exec -T redpanda \
+      rpk topic add-partitions engine.input --num "$missing" --brokers localhost:9092 >/dev/null
+  fi
+  assert_topic_partitions engine.input "$partitions"
 }
 
 create_e2e_topics() {
@@ -85,7 +95,7 @@ assert_e2e_topics_ready() {
   assert_topic_partitions wallet.commands 3
   assert_topic_partitions wallet.replies 3
   assert_topic_partitions wallet.events 3
-  assert_topic_partitions engine.input 1
+  assert_topic_partitions engine.input "${ENGINE_INPUT_PARTITIONS:-8}"
   assert_topic_partitions engine.replies 3
   assert_topic_partitions engine.events 3
 }

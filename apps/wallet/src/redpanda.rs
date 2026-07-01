@@ -884,8 +884,8 @@ mod tests {
         common::{Asset, CommandEnvelope, OrderType, PositionSide, Side},
         engine::{
             AccountDelta, EngineCommand, ExecutionReason, FeeDelta, FundingPayment,
-            FundingPaymentApplied, OrderCancelled, OrderExpired, ReservationReleased,
-            TradeExecuted, TradeSettlement,
+            FundingPaymentApplied, MarkPriceUpdatedInput, OrderCancelled, OrderExpired,
+            ReservationReleased, TradeExecuted, TradeSettlement,
         },
         wallet::{Deposit, PlaceOrderIntent, ReleaseReservation, SettleTrade},
     };
@@ -941,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_input_key_uses_command_input_id() {
+    fn engine_input_key_uses_market_id() {
         let command = EngineCommand::PlaceOrder(
             PlaceOrderIntent {
                 envelope: CommandEnvelope {
@@ -967,11 +967,11 @@ mod tests {
 
         let publication = EngineInputPublication::new(command);
 
-        assert_eq!(publication.key(), "engine-input:place-order:42:order-1");
+        assert_eq!(publication.key(), "7");
     }
 
     #[test]
-    fn engine_input_key_uses_input_id_when_present() {
+    fn engine_input_key_ignores_input_id_for_market_partitioning() {
         let mut command = PlaceOrderIntent {
             envelope: CommandEnvelope {
                 request_id: String::from("req-1"),
@@ -996,7 +996,43 @@ mod tests {
 
         let publication = EngineInputPublication::new(EngineCommand::PlaceOrder(command));
 
-        assert_eq!(publication.key(), "input-1");
+        assert_eq!(publication.key(), "7");
+    }
+
+    #[test]
+    fn stable_partition_can_separate_market_keys() {
+        let sol_partition = stable_partition(b"1", 8);
+        let btc_partition = stable_partition(b"2", 8);
+
+        assert!(sol_partition < 8);
+        assert!(btc_partition < 8);
+        assert_ne!(sol_partition, btc_partition);
+    }
+
+    #[test]
+    fn engine_input_market_keys_route_same_market_to_same_partition() {
+        let first = EngineInputPublication::mark_price_updated(mark_price_input(7, "mark-1"));
+        let second = EngineInputPublication::mark_price_updated(mark_price_input(7, "mark-2"));
+
+        let first_partition = stable_partition(first.key().as_bytes(), 8);
+        let second_partition = stable_partition(second.key().as_bytes(), 8);
+
+        assert_eq!(first.key(), "7");
+        assert_eq!(second.key(), "7");
+        assert_eq!(first_partition, second_partition);
+    }
+
+    #[test]
+    fn engine_input_market_keys_can_route_different_markets_to_different_partitions() {
+        let sol = EngineInputPublication::mark_price_updated(mark_price_input(7, "mark-sol"));
+        let btc = EngineInputPublication::mark_price_updated(mark_price_input(8, "mark-btc"));
+
+        let sol_partition = stable_partition(sol.key().as_bytes(), 8);
+        let btc_partition = stable_partition(btc.key().as_bytes(), 8);
+
+        assert_eq!(sol.key(), "7");
+        assert_eq!(btc.key(), "8");
+        assert_ne!(sol_partition, btc_partition);
     }
 
     #[test]
@@ -1234,5 +1270,19 @@ mod tests {
                 reference_id: String::from("acct-1"),
             })]
         );
+    }
+
+    fn mark_price_input(market_id: i64, input_id: &str) -> MarkPriceUpdatedInput {
+        MarkPriceUpdatedInput {
+            input_id: Some(String::from(input_id)),
+            market_id,
+            mark_price: 100,
+            index_price: 99,
+            source_timestamp_ms: 1_710_000_000_000,
+            published_at_ms: 1_710_000_000_100,
+            valid_until_ms: 1_710_000_005_100,
+            source_sequence: 45_001,
+            source_status: String::from("VALID"),
+        }
     }
 }

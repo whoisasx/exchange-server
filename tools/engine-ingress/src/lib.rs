@@ -338,7 +338,7 @@ mod tests {
             "engine-input:funding-settlement-tick:settle-001"
         );
         assert_eq!(message.topic, "engine.input");
-        assert_eq!(message.message_key, "settle-001");
+        assert_eq!(message.message_key, "1");
         assert_eq!(message.payload_type, "EngineCommand");
         assert_eq!(message.payload["type"], "FundingSettlementTick");
     }

@@ -38,7 +38,9 @@ published after Redpanda accepts the record.
 The same relay also publishes engine inputs to `engine.input`. Orders and
 cancels are enqueued after wallet reservation checks; mark price and funding
 inputs are enqueued by `tools/engine-ingress`. Wallet replies remain direct so API
-callers can receive request status immediately.
+callers can receive request status immediately. Engine input records use
+`market_id` as the Redpanda key so all inputs for one market stay on the
+partition owned by that market's engine worker.
 
 ## Variants
 

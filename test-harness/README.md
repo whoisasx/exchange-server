@@ -74,14 +74,16 @@ test-harness/infra.sh down
 ## Scripts
 
 - `infra.sh up|down|status|logs`: manages local Postgres, Redpanda,
-  TimescaleDB, MinIO, storage setup, and topics.
+  TimescaleDB, MinIO, storage setup, and topics. It creates `engine.input`
+  with eight partitions by default.
 - `smoke.sh`: runs Rust tests, starts exchange services, and drives the REST,
   wallet, stream, TimescaleDB, and websocket flow.
 
 ## Coverage
 
 - Server receives requests.
-- Wallet validates, locks balances, and publishes to `engine.input`.
+- Wallet validates, locks balances, and publishes to `engine.input` keyed by
+  `market_id`.
 - The independently managed engine consumes `engine.input` and publishes
   `engine.replies` plus `engine.events`.
 - Exchange consumers update Postgres, TimescaleDB, ledger rows, and websocket

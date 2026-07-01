@@ -6,6 +6,8 @@ stream consumers, read models, time-series writes, and websocket fanout.
 The matching engine is a separate process. Exchange publishes validated inputs
 to `engine.input` and consumes `engine.replies` plus `engine.events`; it does
 not start, stop, or probe the engine.
+Engine inputs are keyed by `market_id` so the engine can run one
+single-threaded worker per owned market partition.
 
 ## Performance Benchmarks
 
@@ -111,6 +113,7 @@ sequenceDiagram
 - Wallet service for balance validation, locking, settlement, and outbox writes.
 - Redpanda stream integration for wallet commands, wallet events, engine input,
   engine replies, and engine events.
+- `engine.input` routing by `market_id` for multi-market engine workers.
 - Projector, ledger, timeseries, and websocket consumers.
 - Postgres, TimescaleDB, Redpanda, and MinIO local harness.
 - Separate exchange benchmark harness for the API-to-wallet-to-stream path.
